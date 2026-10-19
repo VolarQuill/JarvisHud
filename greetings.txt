@@ -1,0 +1,100 @@
+# =====================================================================
+# JARVIS HUD - greeting corpus
+# ---------------------------------------------------------------------
+# One greeting per line. UTF-8, no BOM.
+#
+#   * Blank lines are ignored.
+#   * Lines beginning with "#" are comments and are ignored.
+#   * Any other line is a candidate greeting.
+#
+# Supported placeholders (substituted before the line is displayed):
+#
+#   {name}     -> the "name" value from config.txt
+#   {time}     -> current local time, HH:MM
+#   {date}     -> current full long date
+#   {weekday}  -> current weekday name
+#   {status}   -> the "status_text" value from config.txt
+#
+# Any other {word} is left exactly as written.
+#
+# A line may carry a time-of-day tag in front of it, separated by a pipe:
+#
+#   morning|A fine morning for it, sir.
+#   afternoon|The workshop is at its brightest, sir.
+#   evening|The blinds are open, sir.
+#   any|Something that suits any hour.
+#
+# A tagged line is only ever shown during that part of the day:
+#   morning   = 05:00 - 11:59
+#   afternoon = 12:00 - 17:59
+#   evening   = 18:00 - 04:59
+#   any       = always eligible
+# Untagged lines are always eligible too. If no line matches the current
+# hour, the whole corpus is used instead.
+#
+# Keep each line under about 64 characters so that it fits the text
+# column on one or two lines. A greeting is chosen at random on every
+# launch, and the previous choice is not repeated when more than one
+# greeting is present.
+# =====================================================================
+
+# --- Greetings -----------------------------------------------------
+Welcome back, sir.
+All systems are nominal, sir.
+The workshop is at your disposal, sir.
+Your workstation is precisely as you left it.
+The archives are indexed and available.
+Sensors are calibrated. Telemetry is clean.
+Power reserves are holding at ninety-eight percent.
+morning|A fine morning for it, sir.
+I am at your disposal, sir.
+The workshop is quiet, sir.
+I have taken the liberty of tidying the logs.
+Diagnostics are clean, sir. Nothing requires you.
+The perimeter is quiet, sir.
+Reactor output is holding steady at nominal.
+Your schedule for today has been compiled, sir.
+There is nothing requiring your immediate attention.
+The briefing is on the desk, sir.
+Everything is prepared, sir.
+Your correspondence has been triaged, sir.
+Consider the workshop yours, sir.
+morning|The morning's telemetry is entirely unremarkable.
+I shall be here, sir. As always.
+evening|The blinds are open, sir.
+Nothing in the laboratory has moved without my knowing.
+Communications are quiet. That is no complaint.
+The weather is unremarkable, sir.
+I have put the kettle on, sir.
+No alarms. No anomalies. No interruptions, sir.
+A small matter, sir: the door was left ajar.
+evening|The instrument bay is warm, sir.
+
+# --- Greetings using placeholders -----------------------------------
+evening|Good evening, {name}. All systems are nominal.
+morning|Good morning, {name}. The workshop awaits you.
+It is {time}, and the workshop is quiet, sir.
+On {weekday}, {name}, I would not dream of hurrying you.
+{date}. The workshop is ready, {name}.
+Systems report: {status}. Noted, sir.
+The clock reads {time}, {name}. I shall not comment.
+morning|{weekday} morning, sir. The logs are uneventful.
+For you, {name}: {status}. The day begins without incident.
+At {time}, {name}, the workshop is warm and ready.
+evening|It is {weekday}, {name}. I have lit the lamps.
+{date}. I trust the day treats you well, {name}.
+At {time}, {name}, your diagnostics are exemplary.
+Status: {status}. The workshop is at your disposal, {name}.
+morning|It is {weekday}, {name}. I shall be brief this morning.
+{time}. {status}, and the day is uneventful, {name}.
+By {date}, {name}, the diagnostics will be done.
+{weekday} suits a quiet start, sir.
+
+# ---------------------------------------------------------------------
+# To add your own greeting, append a new line anywhere in the block
+# above (not after a comment marker), for example:
+#
+#   Good evening, {name}. The kettle is ready.
+#
+# Save the file; the corpus is re-read on every launch.
+# ---------------------------------------------------------------------
