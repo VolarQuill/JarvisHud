@@ -10,6 +10,9 @@ selftest.log
 # backups written by install.ps1 when it preserves an edited data file
 *.bak
 
+# backup of a pre-existing Winlogon legal notice
+winlogon-*.txt
+
 # reference imagery downloaded for design study only.
 # These are third-party images: they are not part of the source, they are
 # not shipped, and they are not licensed for redistribution.

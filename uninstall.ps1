@@ -196,34 +196,41 @@ function Remove-LegalNotice {
     }
 
     $removed = $false
+    $found = $false
     foreach ($valueName in @('LegalNoticeText', 'LegalNoticeCaption')) {
         $existing = Get-ItemProperty -Path $script:WinlogonKey -Name $valueName -ErrorAction SilentlyContinue
-        if ($null -ne $existing) {
-            if (Test-Administrator) {
-                Remove-ItemProperty -Path $script:WinlogonKey -Name $valueName -Force -ErrorAction SilentlyContinue
-                if ($null -eq (Get-ItemProperty -Path $script:WinlogonKey -Name $valueName -ErrorAction SilentlyContinue)) {
-                    Write-Ok ('removed ' + $valueName)
-                    $removed = $true
-                }
-                else {
-                    Write-Warn ('could not remove ' + $valueName)
-                }
+        #  Windows ships these values as empty strings.  An empty value is
+        #  not a legal notice, so it must not be reported as one and must
+        #  not be deleted (removing it would change the default behaviour).
+        $text = ''
+        if ($null -ne $existing) { $text = [string]$existing.$valueName }
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $found = $true
+        if (Test-Administrator) {
+            Remove-ItemProperty -Path $script:WinlogonKey -Name $valueName -Force -ErrorAction SilentlyContinue
+            $still = Get-ItemProperty -Path $script:WinlogonKey -Name $valueName -ErrorAction SilentlyContinue
+            if ($null -eq $still -or [string]::IsNullOrWhiteSpace([string]$still.$valueName)) {
+                Write-Ok ('removed ' + $valueName)
+                $removed = $true
             }
             else {
-                Write-Warn ($valueName + ' needs an elevated session; run this script as administrator to remove it')
+                Write-Warn ('could not remove ' + $valueName)
             }
+        }
+        else {
+            Write-Warn ($valueName + ' needs an elevated session; run this script as administrator to remove it')
         }
     }
 
     if ($removed) {
         Add-Summary 'removed the legal notice text and caption'
     }
-    elseif (-not (Test-Administrator)) {
-        Add-Summary 'the legal notice could not be removed without administrator rights'
-    }
-    else {
+    elseif (-not $found) {
         Write-Ok 'no legal notice values were present'
         Add-Summary 'no legal notice values were present'
+    }
+    elseif (-not (Test-Administrator)) {
+        Add-Summary 'the legal notice could not be removed without administrator rights'
     }
 }
 

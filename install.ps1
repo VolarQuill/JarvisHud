@@ -593,6 +593,21 @@ function Install-LegalNotice {
         throw ('the Winlogon registry key was not found: ' + $script:WinlogonKey)
     }
 
+    #  A legal notice that is already set is the user's own text.  Refuse to
+    #  overwrite it unless -Force was given, and back it up either way.
+    foreach ($valueName in @('LegalNoticeText', 'LegalNoticeCaption')) {
+        $existing = Get-ItemProperty -Path $script:WinlogonKey -Name $valueName -ErrorAction SilentlyContinue
+        $current  = ''
+        if ($null -ne $existing) { $current = [string]$existing.$valueName }
+        if ([string]::IsNullOrWhiteSpace($current)) { continue }
+        if (-not $Force) {
+            throw ('the Winlogon value "' + $valueName + '" is already set. Re-run with -Force to replace it.')
+        }
+        $backupPath = Join-Path $script:ProjectRoot ('winlogon-' + $valueName + '.txt')
+        Set-Content -LiteralPath $backupPath -Value $current -Encoding UTF8
+        Write-Warn ('replaced the existing ' + $valueName + '; the old text was saved to ' + $backupPath)
+    }
+
     $text    = Get-ShippedGreeting
     $caption = $script:NoticeCaption
 
