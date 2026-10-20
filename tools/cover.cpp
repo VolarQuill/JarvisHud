@@ -1,9 +1,24 @@
-//  cover.cpp - a plain Win32 window that covers a rectangle of the screen
+//  cover.cpp - plain Win32 windows that cover a rectangle of the screen
 //  in one solid colour.  Used by the acceptance test to check that a
 //  normal application window really does cover the HUD.
 //
-//  Deliberately NOT topmost: a topmost window would cover the HUD even
-//  if the HUD were topmost too, which would prove nothing.
+//  Two windows are made:
+//
+//    JarvisCoverTestWindow  an ordinary window, NOT topmost.  A topmost
+//                           window would cover the HUD even if the HUD
+//                           were topmost too, which would prove nothing.
+//                           This one is used to read the z order.
+//
+//    JarvisCoverTopWindow   a topmost copy of the same rectangle.  It is
+//                           used for the measurement on the screen: an
+//                           application that keeps re-raising itself (a
+//                           browser that wants to stay in front) would
+//                           otherwise sit on top of the ordinary cover,
+//                           and the screen would say nothing about the
+//                           HUD.  A topmost ordinary window is still
+//                           composited before a layered one, so this
+//                           window is exactly what is needed to catch a
+//                           HUD that was accidentally made layered.
 //
 //    cover.exe [x y w h] [r g b]
 //
@@ -11,6 +26,7 @@
 #include <shellapi.h>
 
 static const wchar_t kClass[] = L"JarvisCoverTestWindow";
+static const wchar_t kTopClass[] = L"JarvisCoverTopWindow";
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     //  Per-monitor DPI awareness, so the rectangle the test asks for is
@@ -52,6 +68,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW);
     SetForegroundWindow(hwnd);
     SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW);
+
+    //  The topmost copy of the same rectangle.  It is what the
+    //  measurement on the screen is made against.
+    WNDCLASSEXW wct = wc;
+    wct.lpszClassName = kTopClass;
+    if (RegisterClassExW(&wct)) {
+        HWND top = CreateWindowExW(WS_EX_TOPMOST, kTopClass, L"cover-top", WS_POPUP,
+                                   x, y, w, h, nullptr, nullptr, instance, nullptr);
+        if (top) {
+            ShowWindow(top, SW_SHOW);
+            SetWindowPos(top, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+        }
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

@@ -226,14 +226,32 @@ try {
     #  Now the decisive measurement: none of the HUD's own pixels may be
     #  visible on the screen in the HUD's rectangle.  Whatever is on top
     #  of it - the covering window, a game, anything - has to be on top.
+    #
+    #  The covering window has a topmost twin, so that this measurement
+    #  does not depend on which application the machine happens to have
+    #  open.  An application that keeps re-raising itself would otherwise
+    #  sit on top of the ordinary cover, and the screen would show that
+    #  application instead of the cover: the question could not be
+    #  answered at all.  A topmost ordinary window is still composited
+    #  before a layered one, so a HUD that was accidentally made layered
+    #  still shows up here.
+    #
+    #  The screen is captured once, wide, and the panel's rectangle is
+    #  cut out of that.  Two separate captures race with the compositor:
+    #  the screen device context is not the composited output, so a
+    #  capture of the same spot a moment later can come back empty.
+    $wideB = "$env:TEMP\hud_acc_covered_wide.png"
     $shotB = "$env:TEMP\hud_acc_covered.png"
-    [Cap]::Shot($shotB, $r.Left, $r.Top, $pw, $ph)
+    [Cap]::Shot($wideB, 0, 0, ($r.Right + 60), ($r.Bottom + 60))
+    [Cap]::Crop($wideB, $shotB, $r.Left, $r.Top, $pw, $ph)
     $stillHud = [Cap]::MatchCount($own, $shotB, 0, 0, $pw, $ph, 12)
     $pctHud = [Math]::Round(100.0 * $stillHud / ($pw * $ph))
+    $pctCover = [Math]::Round(100.0 * [Cap]::ColorFraction($shotB, 255, 0, 255, 8))
+    Check 'the covering window is on screen' ($pctCover -ge 50) `
+        ("{0}% of the region is the covering window" -f $pctCover)
     Check 'covered by an application' ($pctHud -le 2) `
         ("$pctHud% of the panel is still visible on top of the application")
-    $pctCover = [Math]::Round(100.0 * [Cap]::ColorFraction($shotB, 255, 0, 255, 8))
-    Write-Host ("  (the covering window's own colour is {0}% of the region; the rest is whatever else is on top)" -f $pctCover)
+    [Cap]::Shot("$env:TEMP\hud_acc_covered_desktop.png", 0, 0, 760, 300)
     [Cap]::Shot("$env:TEMP\hud_acc_covered_desktop.png", 0, 0, 760, 300)
     Stop-Process -Id $cover.Id -Force -ErrorAction SilentlyContinue
     $cover = $null
