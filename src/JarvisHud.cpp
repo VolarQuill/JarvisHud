@@ -1141,6 +1141,9 @@ private:
     //  layered cannot be transparent, so the fade is done by mixing the
     //  panel into the colour of the card.
     int   m_frameFade = 255;
+    //  The part of the frame that has to be flattened again.  A width
+    //  of zero means the whole panel.
+    int   m_flattenX = 0, m_flattenY = 0, m_flattenW = 0, m_flattenH = 0;
 
     //  --- the desktop band ----------------------------------------------------
     //  The panel is an ordinary top level window that is placed directly
@@ -1246,6 +1249,7 @@ private:
     void  DrawStatusSoftware();
     bool  BuildStatusBitmap();
     void  FlattenFrame(int fade);
+    void  FlattenFrame(int fade, int rx, int ry, int rw, int rh);
     void  Present();
     bool  CheckLifetime(double tGlobal, double tLocal, double tLocalEnd);
     void  RestoreZone(int x, int y, int w, int h);
@@ -2199,12 +2203,31 @@ void JarvisHud::RestoreZone(int x, int y, int w, int h) {
 //  window that is not layered cannot be made transparent.
 //---------------------------------------------------------------------
 void JarvisHud::FlattenFrame(int fade) {
+    FlattenFrame(fade, 0, 0, m_panelW, m_panelH);
+}
+
+//  Flattens only the given rectangle of the frame.  The rest of the
+//  flattened surface is left as it is, which is what makes this worth
+//  doing: the panel is flattened thirty times a second for as long as
+//  it is on the screen, and on a normal frame only the reactor has
+//  moved.  The pixels outside the rectangle have not changed and the
+//  fade has not changed either, so the flattened values that are
+//  already there are still the right ones.
+void JarvisHud::FlattenFrame(int fade, int rx, int ry, int rw, int rh) {
     if (!m_outDib.bits || !m_blitDib.bits) return;
     if (fade < 0) fade = 0;
     if (fade > 255) fade = 255;
 
     const int w = m_panelW, h = m_panelH;
     if (w <= 0 || h <= 0) return;
+
+    //  The rectangle is clamped to the panel.
+    int x0 = rx, y0 = ry, x1 = rx + rw - 1, y1 = ry + rh - 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w - 1) x1 = w - 1;
+    if (y1 > h - 1) y1 = h - 1;
+    if (x1 < x0 || y1 < y0) return;
 
     const int srcStride = m_outDib.w * 4;
     const int dstStride = m_blitDib.w * 4;
@@ -2232,12 +2255,12 @@ void JarvisHud::FlattenFrame(int fade) {
         fadeB[v] = ClampByte(bb + MixRound(v - bb, fade));
     }
 
-    for (int y = 0; y < h; ++y) {
+    for (int y = y0; y <= y1; ++y) {
         //  The composed frame is stored bottom up, the painted one top
         //  down, so the rows have to be read the other way round.
         const DWORD* s = (const DWORD*)(m_outDib.bits + (size_t)(h - 1 - y) * (size_t)srcStride);
         DWORD* d = (DWORD*)(m_blitDib.bits + (size_t)y * (size_t)dstStride);
-        for (int x = 0; x < w; ++x) {
+        for (int x = x0; x <= x1; ++x) {
             const DWORD p = s[x];
             const int sa = (int)(p >> 24);
             const int cr = (int)((p >> 16) & 0xFFu) + overR[sa];
@@ -2268,10 +2291,12 @@ void JarvisHud::Present() {
     if (!m_present || !m_hwnd || !m_outDib.bits) return;
     LARGE_INTEGER f0, f1;
     QueryPerformanceCounter(&f0);
-    FlattenFrame(m_frameFade);
+    if (m_flattenW > 0 && m_flattenH > 0)
+        FlattenFrame(m_frameFade, m_flattenX, m_flattenY, m_flattenW, m_flattenH);
+    else
+        FlattenFrame(m_frameFade);
     QueryPerformanceCounter(&f1);
-    m_profFlatten += (double)(f1.QuadPart - f0.QuadPart) * (1000.0 / CpuFrequency());
-    RedrawWindow(m_hwnd, nullptr, nullptr,
+    m_profFlatten += (double)(f1.QuadPart - f0.QuadPart) * (1000.0 / CpuFrequency());    RedrawWindow(m_hwnd, nullptr, nullptr,
                  RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_NOCHILDREN);
 }
 
@@ -2456,6 +2481,25 @@ void JarvisHud::RenderFrame() {
     //  The sweep band spans the whole panel and overlaps the other zones;
     //  while it is active the entire surface is recomposed.
     const bool fullSurface = m_fullInit || fading || sweepActive;
+
+    //  ---- the part of the frame that has to be flattened again -----------------
+    //  Only the zones that were restored have changed, so only they have to
+    //  be flattened again.  The fade is the exception: it changes every
+    //  pixel of the panel, so when it moves the whole panel is done.
+    if (fullSurface || alphaChanged || zones.empty()) {
+        m_flattenX = 0; m_flattenY = 0; m_flattenW = 0; m_flattenH = 0;
+    } else {
+        int fx0 = zones[0].x, fy0 = zones[0].y;
+        int fx1 = fx0 + zones[0].w, fy1 = fy0 + zones[0].h;
+        for (const Zone& z : zones) {
+            if (z.x < fx0) fx0 = z.x;
+            if (z.y < fy0) fy0 = z.y;
+            if (z.x + z.w > fx1) fx1 = z.x + z.w;
+            if (z.y + z.h > fy1) fy1 = z.y + z.h;
+        }
+        m_flattenX = fx0; m_flattenY = fy0;
+        m_flattenW = fx1 - fx0; m_flattenH = fy1 - fy0;
+    }
 
     //  ---- restore the base under the dirty zones -----------------------------
     LARGE_INTEGER pc0, pc1;
@@ -2704,7 +2748,10 @@ bool JarvisHud::FindDesktopHost(int waitMs) {
         m_desktopHost = nullptr;
         m_iconHost = nullptr;
         if (GetTickCount64() >= deadline) return false;
-        Sleep(200);
+        //  The wait is polled finely: at logon the shell is usually a
+        //  fraction of a second away, and the panel should not sit
+        //  there waiting for the next tick of a slow clock.
+        Sleep(25);
     }
 }
 
@@ -3143,6 +3190,9 @@ int JarvisHud::RunSelfTest() {
     //  flattened onto the card and painted into the window.
     double presentMs = 0.0;
     {
+        //  The whole panel is flattened here, so that the number is the
+        //  worst case and stays comparable from one build to the next.
+        m_flattenX = 0; m_flattenY = 0; m_flattenW = 0; m_flattenH = 0;
         QueryPerformanceCounter(&t0);
         for (int i = 0; i < kProbeFrames; ++i) Present();
         QueryPerformanceCounter(&t1);
