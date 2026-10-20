@@ -660,14 +660,17 @@ Notes:
 
 ## Testing
 
-Three tools live in `tools/`. They are for development only; nothing in them is installed and
+Six tools live in `tools/`. They are for development only; nothing in them is installed and
 the program does not depend on any of them.
 
 | file | what it does |
 |---|---|
-| `tools/acceptance.ps1` | The acceptance test. It starts the HUD, checks the window's extended styles, checks that the panel is in the desktop band, screenshots the screen to prove the panel is painted there, then launches an ordinary application window over the panel and screenshots again to prove the application covers it. It reports `PASS`/`FAIL` per check and exits with the number of failures. |
-| `tools/cover.cpp` | A plain Win32 window that covers a rectangle of the screen in one solid colour. It is deliberately *not* topmost — a topmost window would cover the HUD even if the HUD were topmost too, which would prove nothing. |
+| `tools/acceptance.ps1` | The acceptance test. It starts the HUD, checks the window's extended styles, checks that the panel is in the desktop band, proves the panel is painted, then puts an application window over the panel and proves the application covers it. It reports `PASS`/`FAIL` per check and exits with the number of failures. |
+| `tools/cover.cpp` | A plain Win32 window that covers a rectangle of the screen in one solid colour. It is made twice: an ordinary one, which is deliberately *not* topmost (a topmost window would cover the HUD even if the HUD were topmost too, which would prove nothing), and a topmost twin, which is what the measurement on the screen is made against — that way the result does not depend on which application the machine happens to have open. |
 | `tools/shotlib.cs` | A small C# helper (compiled on the fly by the scripts) for screen captures, pixel counting and image comparison. |
+| `tools/verify.ps1` | A one-line diagnostic: which greeting was chosen, the font, the DPI, the panel size and the memory the process is using. |
+| `tools/zorder.ps1` | Prints the visible top-level windows in z order, so the panel's place in the desktop band can be seen directly. |
+| `tools/devshot.ps1` | Renders a still of the panel without showing it on the screen. |
 
 ```powershell
 # build the cover window first
@@ -690,6 +693,14 @@ Get-Content "$env:TEMP\jarvis-selftest.txt"
 rect and the process's memory and CPU use, and saves a screenshot of the top-left corner.
 `tools/zorder.ps1` prints the whole visible z-order, which is how the desktop band was
 verified. `tools/devshot.ps1` renders a still of the panel without showing it.
+
+The acceptance test measures the z order and the window's *own* pixels rather than a screen
+capture alone. A capture of the panel's rectangle shows whatever the compositor put on top of
+it, which on a machine with a full screen game or a browser running is the game or the browser,
+not the panel. `PrintWindow` shows the panel's own content whatever is on top, so "the panel
+painted itself" and "the panel is under the application" are two separate questions and each
+is measured directly. Nothing is moved, resized, hidden or closed, so a full screen game keeps
+running undisturbed.
 
 ---
 
