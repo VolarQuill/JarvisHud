@@ -63,19 +63,30 @@ the pre-logon screen itself, see *The pre-login legal notice* below.
 
 ### No compiler? There is a ready-made binary
 
-`dist/JarvisHud.exe` is a **self-contained build**: it imports only Windows system DLLs
-(`KERNEL32`, `USER32`, `GDI32`, `ADVAPI32`, `gdiplus` and the UCRT forwarders that ship with
-Windows 10 and later), so it runs on any supported machine with nothing else installed and no
-compiler anywhere near it. It is 768 kB, it is the same build the numbers in *Performance* below
-were measured with, and it is what `install.ps1` falls back to when it cannot find a compiler.
+`dist/` is a complete, ready-to-run copy of the program:
 
-Download the repository (or just `dist/JarvisHud.exe`, `config.txt` and `greetings.txt`) and
-either:
+```
+dist/
+├── JarvisHud.exe    the self-contained build
+├── config.txt       its settings
+└── greetings.txt    the greetings it says
+```
 
-* copy the three files into one folder and double-click `JarvisHud.exe` — it greets you and
-  stays; or
-* run `install.ps1`, which installs the program, registers the autostart entry and puts the
-  files in the right place.
+`JarvisHud.exe` imports only Windows system DLLs (`KERNEL32`, `USER32`, `GDI32`, `ADVAPI32`,
+`gdiplus` and the UCRT forwarders that ship with Windows 10 and later), so it runs on any
+supported machine with nothing else installed and no compiler anywhere near it. It is 768 kB, it
+is the same build the numbers in *Performance* below were measured with, and it is what
+`install.ps1` falls back to when it cannot find a compiler.
+
+Download the `dist` folder, keep the three files together, and double-click `JarvisHud.exe` — it
+greets you and stays. That is the whole install: the program reads `config.txt` and
+`greetings.txt` from its own directory, so the three files have to stay in the same folder.
+
+To have it start with Windows as well, run `install.ps1` instead: it copies the files to
+`%LOCALAPPDATA%\JarvisHud` and registers the autostart entry.
+
+The copies in `dist/` are the same files as the ones next to `install.ps1`. The installer always
+uses those, so edit those if you want to change what a fresh install gets.
 
 ### One-liner
 
