@@ -54,12 +54,28 @@ the pre-logon screen itself, see *The pre-login legal notice* below.
 | OS | Windows 11 25H2 (build 26200) is the reference target. Also runs on Windows 10 1809+ and Windows 11. Needs per-monitor DPI awareness (v2), present since Windows 10 1703. |
 | Runtime | None. GDI+ (`gdiplus.dll`) ships with Windows. No .NET, no redistributable, no installer payload beyond the three files below. |
 | Fonts | Monospace only. Prefers **Cascadia Mono** (ships with Windows 11 22H2+), then **Consolas**, then **Lucida Console**, then **Courier New**. The first family that actually loads is used; there is no proportional fallback. |
-| Toolchain | Only needed if you build from source: MSYS2 with the UCRT64 environment (built and tested with `g++` 16.2.0; C++17 and `-static` are the only requirements). A prebuilt `JarvisHud.exe` needs no compiler. |
+| Toolchain | Not needed. `dist/JarvisHud.exe` is a self-contained build that runs as it is. A compiler is only required if you want to build from source: MSYS2 with the UCRT64 environment (built and tested with `g++` 16.2.0; C++17 and `-static` are the only requirements). |
 | Privileges | Not needed for the HUD itself. Administrator rights are needed only for the optional pre-login legal notice (see below). |
 
 ---
 
 ## Install
+
+### No compiler? There is a ready-made binary
+
+`dist/JarvisHud.exe` is a **self-contained build**: it imports only Windows system DLLs
+(`KERNEL32`, `USER32`, `GDI32`, `ADVAPI32`, `gdiplus` and the UCRT forwarders that ship with
+Windows 10 and later), so it runs on any supported machine with nothing else installed and no
+compiler anywhere near it. It is 768 kB, it is the same build the numbers in *Performance* below
+were measured with, and it is what `install.ps1` falls back to when it cannot find a compiler.
+
+Download the repository (or just `dist/JarvisHud.exe`, `config.txt` and `greetings.txt`) and
+either:
+
+* copy the three files into one folder and double-click `JarvisHud.exe` — it greets you and
+  stays; or
+* run `install.ps1`, which installs the program, registers the autostart entry and puts the
+  files in the right place.
 
 ### One-liner
 
@@ -83,11 +99,11 @@ Useful variants:
 ```
 
 The installer is idempotent: running it twice is safe. It creates the install folder, builds
-`JarvisHud.exe` if a compiler is found (otherwise it copies a prebuilt `JarvisHud.exe` from the
-project root, and errors out clearly if there is neither), copies `greetings.txt` and
-`config.txt` without clobbering user edits (an existing file is backed up to `<file>.bak` unless
-`-Force` is given), and registers the autostart entry. It never copies the `reference/` or `dev/`
-folders.
+`JarvisHud.exe` if a compiler is found (otherwise it copies a prebuilt `JarvisHud.exe` from
+`dist/` or from the project root, and errors out clearly if there is neither), copies
+`greetings.txt` and `config.txt` without clobbering user edits (an existing file is backed up to
+`<file>.bak` unless `-Force` is given), and registers the autostart entry. It never copies the
+`reference/` or `dev/` folders.
 
 Default install location: `%LOCALAPPDATA%\JarvisHud` (i.e. `C:\Users\<you>\AppData\Local\JarvisHud`).
 
@@ -464,9 +480,9 @@ code 0 and changes nothing.
 
 ## Performance
 
-Measured on the reference machine (Windows 11 25H2 build 26200, Intel Core i5-8350U 4c/8t,
-16 GB RAM, display at 125% scaling, so the panel is 650x233 device pixels) with the shipped
-build.
+Measured on the reference machine (Windows 11 25H2 build 26200, a 4-core/8-thread 8th
+generation Core i5, 16 GB RAM, display at 125% scaling, so the panel is 650x233 device pixels)
+with the shipped build.
 
 | metric | value |
 |---|---|
@@ -484,11 +500,10 @@ How it was measured:
   `PrivateMemorySize64` and `TotalProcessorTime` every 100 ms until the process exits; the
   reported CPU is the last sample taken before exit. Repeat runs were within 10% of each other.
 * **Per-frame figures** — the program instruments its own render path and reports it in the
-  self-test log (`probe_frames=120 ... present_ms=1.9363 ... flatten=0.7122`). The independent
-  cross-check is `probe/verify/v20_deltas.exe`, which times a full 1280x800 GDI+ scene (rounded
-  panel fill, glow blit, four rings, a dashed arc, two text lines) at 4.98 ms on this machine.
-  Timing a frame without destroying the `Graphics` under-reports the cost by roughly an order of
-  magnitude, so the `Graphics` lifetime is inside the timed region.
+  self-test log (`probe_frames=120 ... present_ms=1.9363 ... flatten=0.7122`). A frame is timed
+  with the `Graphics` alive for its whole life: timing it without destroying the `Graphics`
+  under-reports the cost by roughly an order of magnitude, so the `Graphics` lifetime is inside
+  the timed region.
 
 Where the memory goes: two 32-bit ARGB surfaces of the scaled panel, 650x233x4 = 606 kB each, so
 about 1.2 MB of pixel data. The rest of the working set is shared system pages (`gdiplus.dll`,

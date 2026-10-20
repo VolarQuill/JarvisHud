@@ -4,6 +4,10 @@ JarvisHud.exe
 *.obj
 tools/cover.exe
 
+# the self-contained binary that ships with the repository, so that the
+# program can be installed on a machine with no compiler
+!dist/JarvisHud.exe
+
 # frames the self test writes next to the executable
 JarvisHud_frame*.png
 

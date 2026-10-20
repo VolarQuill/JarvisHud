@@ -33,6 +33,12 @@
     greetings.txt the user has edited. The previous contents are always
     saved next to the file as "<name>.bak" before anything is replaced.
 
+.PARAMETER UsePrebuilt
+    Do not look for a compiler. Install the prebuilt, self-contained
+    JarvisHud.exe (from dist/, or from the project root) instead of
+    building one from source. This is the path for a machine that has no
+    compiler: the installed program is the same single file either way.
+
 .NOTES
     Data file policy
     ----------------
@@ -70,7 +76,8 @@ param(
     [string] $InstallPath = (Join-Path $env:LOCALAPPDATA 'JarvisHud'),
     [switch] $NoAutoStart,
     [switch] $LegalNotice,
-    [switch] $Force
+    [switch] $Force,
+    [switch] $UsePrebuilt
 )
 
 # ---------------------------------------------------------------------------
@@ -362,24 +369,73 @@ function Invoke-ExeBuild {
     return $null
 }
 
+function Stop-RunningHud {
+    <#
+        .SYNOPSIS
+            Stops a running copy of the HUD that is holding the executable
+            open, so that the file can be replaced.
+
+        .DESCRIPTION
+            Only a copy that runs from the install folder is stopped.  The
+            program is started again by the next logon, and the installer
+            re-registers the autostart entry afterwards.
+    #>
+    param([Parameter(Mandatory = $true)][string] $DestinationDir)
+
+    $destination = Join-Path $DestinationDir $script:ExeName
+    $name        = [IO.Path]::GetFileNameWithoutExtension($script:ExeName)
+
+    $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+    foreach ($proc in $procs) {
+        $path = $null
+        try { $path = $proc.Path } catch { $path = $null }
+        if (-not $path) { continue }
+        if ($path -ine $destination) { continue }
+
+        Write-Step ('stopping the running ' + $script:ExeName + ' (pid ' + $proc.Id + ')')
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            Write-Ok ('stopped pid ' + $proc.Id)
+        }
+        catch {
+            Write-Warn ('could not stop pid ' + $proc.Id + ': ' + $_.Exception.Message)
+        }
+    }
+    Start-Sleep -Milliseconds 600
+}
+
 function Install-Executable {
     <#
         .SYNOPSIS
             Puts JarvisHud.exe into the install folder.
 
         .DESCRIPTION
-            Prefers building from source. Falls back to the prebuilt exe in
-            the project root when no compiler is available or the build
-            fails. Errors out (non-zero exit) when neither is possible.
+            Prefers building from source. Falls back to the prebuilt exe
+            (the one in dist/, or the one in the project root) when no
+            compiler is available or the build fails. Errors out (non-zero
+            exit) when neither is possible.
     #>
-    param([Parameter(Mandatory = $true)][string] $DestinationDir)
+    param(
+        [Parameter(Mandatory = $true)][string] $DestinationDir,
+        [switch] $UsePrebuilt
+    )
 
     $destination = Join-Path $DestinationDir $script:ExeName
-    $prebuilt    = Join-Path $script:ProjectRoot $script:ExeName
     $command     = $null
 
-    $compiler = Get-CppCompiler
-    $canBuild = ($null -ne $compiler) -and (Test-Path -LiteralPath $script:SourceFile)
+    #  A copy that is running holds its own executable open, and the file
+    #  cannot be replaced while it does.
+    Stop-RunningHud -DestinationDir $DestinationDir
+
+    $compiler = $null
+    $canBuild = $false
+    if (-not $UsePrebuilt) {
+        $compiler = Get-CppCompiler
+        $canBuild = ($null -ne $compiler) -and (Test-Path -LiteralPath $script:SourceFile)
+    }
+    else {
+        Write-Info 'using the prebuilt executable (-UsePrebuilt)'
+    }
 
     if ($canBuild) {
         Write-Step ('building ' + $script:ExeName + ' with ' + $compiler)
@@ -406,6 +462,9 @@ function Install-Executable {
 
         if ($null -ne $command) { return }
     }
+    elseif ($UsePrebuilt) {
+        #  Already said so above; nothing to warn about.
+    }
     elseif ($null -eq $compiler) {
         Write-Warn 'no C++ compiler found'
     }
@@ -413,16 +472,24 @@ function Install-Executable {
         Write-Warn ('source file not found: ' + $script:SourceFile)
     }
 
-    # Fall back to the prebuilt executable in the project root.
-    if (Test-Path -LiteralPath $prebuilt) {
-        Write-Step ('no usable build - copying the prebuilt ' + $script:ExeName)
-        Copy-Item -LiteralPath $prebuilt -Destination $destination -Force
-        Write-Ok ('copied the prebuilt ' + $script:ExeName)
-        if ($null -ne $compiler) {
-            Copy-RuntimeDependencies -ExePath $destination -Compiler $compiler
+    #  Fall back to a prebuilt executable.  There are two: the one in the
+    #  project root (a local build) and the one in dist/, which is the
+    #  self-contained build that ships with the repository and needs no
+    #  compiler at all.
+    foreach ($prebuilt in @(
+        (Join-Path $script:ProjectRoot $script:ExeName),
+        (Join-Path $script:ProjectRoot (Join-Path 'dist' $script:ExeName)))) {
+
+        if (Test-Path -LiteralPath $prebuilt) {
+            Write-Step ('no usable build - copying the prebuilt ' + $script:ExeName)
+            Copy-Item -LiteralPath $prebuilt -Destination $destination -Force
+            Write-Ok ('copied the prebuilt ' + $script:ExeName)
+            if ($null -ne $compiler) {
+                Copy-RuntimeDependencies -ExePath $destination -Compiler $compiler
+            }
+            Add-Summary ('copied the prebuilt ' + $script:ExeName)
+            return
         }
-        Add-Summary ('copied the prebuilt ' + $script:ExeName)
-        return
     }
 
     throw ('neither a working build nor a prebuilt ' + $script:ExeName +
@@ -732,7 +799,7 @@ try {
     $exePath = Join-Path $InstallPath $script:ExeName
 
     # -- executable --------------------------------------------------------
-    Install-Executable -DestinationDir $InstallPath
+    Install-Executable -DestinationDir $InstallPath -UsePrebuilt:$UsePrebuilt
 
     # -- data files --------------------------------------------------------
     Write-Step 'data files'
