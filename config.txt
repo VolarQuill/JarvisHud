@@ -85,6 +85,19 @@ show_clock=1
 # placeholder in greetings.txt.
 status_text=SYSTEM ONLINE
 
+# --- Starting with Windows ------------------------------------------
+
+# 1 = keep the entry in
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Run, so the panel
+# comes up at logon. 0 = remove it.
+#
+# The panel checks the entry on every launch and puts it back when it
+# has gone missing, so the greeting cannot silently stop coming up.
+# Set this to 0 to turn that off for good, or run the program with
+# --uninstall-autostart to remove the entry and set this to 0 in one
+# go. --install-autostart does the opposite.
+autostart=1
+
 # --- The desktop band ----------------------------------------------
 
 # The panel always sits in the DESKTOP BAND: above the wallpaper and

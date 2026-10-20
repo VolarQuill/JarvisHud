@@ -296,6 +296,7 @@ at 96 DPI, 21 px at 125% scaling).
 | `greeting_line` | `1` | Which line of `greetings.txt` the panel greets you with when it comes up, counted from one. Line 1 is *"Welcome back, sir."*. `0` = pick one at random instead, using the rotation model below. |
 | `rotate_seconds` | `60` | How often the persistent panel replaces the greeting it is showing with another one from `greetings.txt`. The new line is typed out from the beginning; the panel never moves or flickers. `0` = never rotate. |
 | `notice_text` | `0` | `1` = also write the chosen greeting to the Winlogon `LegalNoticeText` value so it appears on the pre-login screen. Needs administrator rights and only takes effect after a restart. |
+| `autostart` | `1` | `1` = keep the "start with Windows" entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The panel checks the entry on every launch and puts it back if it has gone missing, so the greeting cannot silently stop coming up. `0` = remove the entry and stop repairing it. |
 
 A complete, commented `config.txt` is installed alongside the executable; the table above is the
 authoritative list of what the program reads.
@@ -549,6 +550,12 @@ at sign-in and leaves nothing running.
 ## Troubleshooting
 
 **It does not appear at all.**
+The `Run` value is what starts the panel at logon, and it is the one thing that can go missing
+without the program knowing: a cleanup tool, or an uninstall that was never finished, will remove
+it, and then the greeting simply never comes up. The panel repairs this by itself — it checks the
+entry on every launch and puts it back — so running the exe once is enough to restore it. To turn
+the entry off on purpose, set `autostart=0` in `config.txt` or run `--uninstall-autostart`.
+
 Check that the `Run` value exists and points at the exe that is actually on disk:
 
 ```powershell
@@ -623,6 +630,13 @@ Get-Content "$env:TEMP\jarvis-selftest.txt"
 # size, frames drawn, CPU time)
 .\JarvisHud.exe --log "$env:TEMP\jarvis.log"
 Get-Content "$env:TEMP\jarvis.log"
+
+# register the "start with Windows" entry, and remember it in config.txt
+.\JarvisHud.exe --install-autostart
+
+# remove the entry again, and set autostart=0 in config.txt so that the
+# panel does not put it back on the next launch
+.\JarvisHud.exe --uninstall-autostart
 ```
 
 The self test also renders one frame to `JarvisHud_frame.png` next to the executable, which is a

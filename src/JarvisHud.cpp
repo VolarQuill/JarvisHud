@@ -280,6 +280,10 @@ struct Config {
     //  desktopWaitMs: how long to wait for the shell's desktop window to
     //  appear at logon before falling back to the top level popup.
     int         desktopWaitMs  = 3000;
+    //  autostart: 1 keeps the "start with Windows" entry, 0 removes it.
+    //  The panel puts the entry back on launch when it has gone missing,
+    //  so that the greeting cannot silently stop coming up at logon.
+    int         autostart      = 1;
 };
 
 bool IsKnownPosition(const std::wstring& p) {
@@ -313,6 +317,7 @@ void ApplyConfigLine(const std::wstring& keyRaw, const std::wstring& val, Config
     else if (key == L"greeting_line")    cfg.greetingLine = ParseInt(val, cfg.greetingLine);
     else if (key == L"rotate_seconds")   cfg.rotateSeconds = ParseInt(val, cfg.rotateSeconds);
     else if (key == L"desktop_wait_ms")  cfg.desktopWaitMs = ParseInt(val, cfg.desktopWaitMs);
+    else if (key == L"autostart")        cfg.autostart = ParseInt(val, cfg.autostart);
     //  Unknown keys are ignored on purpose.
 }
 
@@ -331,8 +336,112 @@ bool LoadConfig(const std::wstring& path, Config& cfg) {
 }
 
 //======================================================================
-//  4.  Greeting corpus, selection and the "no immediate repeat" state
+//  3b.  Autostart
+//
+//  The panel is started at logon by an entry in
+//  HKCU\Software\Microsoft\Windows\CurrentVersion\Run.  The installer
+//  writes that entry, but it can also go missing - a cleanup tool, or
+//  an uninstall that was never finished - and the panel then simply
+//  never comes up at logon, with nothing to say why.  So the panel
+//  checks the entry on every launch and puts it back when it is gone.
+//
+//  The check is deliberately limited to the installed copy.  A panel
+//  that is run from the project folder must never point the Run key
+//  at itself, because that would take the greeting away from the
+//  installed program.
 //======================================================================
+
+const wchar_t* const kRunKeyPath    = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t* const kRunValueName  = L"JarvisHud";
+
+std::wstring RunValueFor(const std::wstring& exePath) {
+    std::wstring cmd = L"\"";
+    cmd.append(exePath);
+    cmd += L"\"";
+    return cmd;
+}
+
+bool IsAutostartEnabled() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+    wchar_t buf[2048];
+    DWORD sz = sizeof(buf), type = 0;
+    bool found = false;
+    if (RegQueryValueExW(key, kRunValueName, nullptr, &type, (LPBYTE)buf, &sz) == ERROR_SUCCESS)
+        found = (type == REG_SZ || type == REG_EXPAND_SZ);
+    RegCloseKey(key);
+    return found;
+}
+
+bool SetAutostartEnabled(bool enabled, const std::wstring& exePath) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return false;
+    bool ok = true;
+    if (enabled) {
+        const std::wstring cmd = RunValueFor(exePath);
+        ok = (RegSetValueExW(key, kRunValueName, 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                             (DWORD)((cmd.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS);
+    } else {
+        const LONG rc = RegDeleteValueW(key, kRunValueName);
+        ok = (rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND);
+    }
+    RegCloseKey(key);
+    return ok;
+}
+
+//  True when this copy is the one in %LOCALAPPDATA%\JarvisHud, that is
+//  the copy the Run key is supposed to point at.
+bool IsInstalledCopy(const std::wstring& exeDir) {
+    wchar_t local[1024];
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local,
+                                            (DWORD)(sizeof(local) / sizeof(local[0])));
+    if (n == 0 || n >= sizeof(local) / sizeof(local[0])) return false;
+    std::wstring want(local, n);
+    while (!want.empty() && (want.back() == L'\\' || want.back() == L'/')) want.pop_back();
+    want += L"\\JarvisHud";
+    return LowerAscii(exeDir) == LowerAscii(want);
+}
+
+//  Rewrites one key in a config file.  The comments and every other
+//  line are kept exactly as they were.
+bool SaveConfigKey(const std::wstring& path, const std::wstring& key, const std::wstring& value) {
+    if (path.empty() || key.empty()) return false;
+    const std::wstring wanted = LowerAscii(TrimWs(key));
+
+    std::string blob;
+    if (!ReadWholeFile(path, blob)) return false;
+    blob = StripUtf8Bom(blob);
+
+    const std::string eol = blob.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string newLine = NarrowUtf8(TrimWs(key)) + "=" + NarrowUtf8(TrimWs(value));
+
+    std::vector<std::string> lines = SplitLines(blob);
+    bool replaced = false;
+    for (std::string& line : lines) {
+        const std::wstring trimmed = TrimWs(Widen(line));
+        if (trimmed.empty() || trimmed[0] == L'#') continue;
+        const size_t eq = trimmed.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        if (LowerAscii(TrimWs(trimmed.substr(0, eq))) != wanted) continue;
+        line = newLine;
+        replaced = true;
+        break;
+    }
+    if (!replaced) lines.push_back(newLine);
+
+    std::string out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) out += eol;
+        out += lines[i];
+    }
+    out += eol;
+    return WriteTextFile(path, out, false);
+}
+
+
 //----------------------------------------------------------------------
 //  A greeting line may carry an optional time-of-day tag, written as
 //  "morning|" / "afternoon|" / "evening|" / "any|" in front of the text.
@@ -982,6 +1091,8 @@ private:
     //  --- cli -----------------------------------------------------------------
     bool m_selftest = false;
     bool m_setNotice = false;
+    bool m_installAutostart = false;
+    bool m_uninstallAutostart = false;
     int  m_durationMs = 0;
 
     //  The named mutex that keeps a second copy of the panel off the
@@ -1183,6 +1294,10 @@ void JarvisHud::ParseCommandLine(const std::wstring& cmdLine) {
             m_selftest = true;
         } else if (t == L"--set-notice") {
             m_setNotice = true;
+        } else if (t == L"--install-autostart") {
+            m_installAutostart = true;
+        } else if (t == L"--uninstall-autostart") {
+            m_uninstallAutostart = true;
         } else if (t == L"--duration" && i + 1 < tokens.size()) {
             m_durationMs = ParseInt(tokens[++i], 0);
         } else if (t == L"--log" && i + 1 < tokens.size()) {
@@ -3206,7 +3321,7 @@ int JarvisHud::Run(HINSTANCE instance, const std::wstring& cmdLine) {
     //  kernel when the process dies, so a copy that was killed does not
     //  block the next one.  The diagnostic modes do not put a panel on
     //  the screen, so they are allowed to run alongside a live panel.
-    if (!m_selftest && !m_setNotice) {
+    if (!m_selftest && !m_setNotice && !m_installAutostart && !m_uninstallAutostart) {
         m_singleInstance = CreateMutexW(nullptr, TRUE, L"Local\\JarvisHudPanel");
         if (m_singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
             CloseHandle(m_singleInstance);
@@ -3229,6 +3344,21 @@ int JarvisHud::Run(HINSTANCE instance, const std::wstring& cmdLine) {
     //  ---- configuration (a missing file is not fatal) -------------------------
     m_configLoaded = LoadConfig(m_exeDir + L"\\config.txt", m_cfg);
     Mark("config");
+
+    //  ---- autostart ----------------------------------------------------------
+    //  The Run key entry is what brings the panel up at logon.  It is
+    //  written here when it has gone missing, so that the greeting
+    //  cannot silently stop coming up and leave the desktop bare.
+    if (m_installAutostart || m_uninstallAutostart) {
+        const bool want = m_installAutostart;
+        const bool ok = SetAutostartEnabled(want, m_exePath);
+        //  The choice is remembered, so that the self healing below does
+        //  not undo it on the next launch.
+        SaveConfigKey(m_exeDir + L"\\config.txt", L"autostart", want ? L"1" : L"0");
+        return ok ? 0 : 1;
+    }
+    if (m_cfg.autostart != 0 && !IsAutostartEnabled() && IsInstalledCopy(m_exeDir))
+        SetAutostartEnabled(true, m_exePath);
 
     //  ---- greeting corpus ----------------------------------------------------
     m_corpus = LoadGreetings(m_exeDir + L"\\greetings.txt");
