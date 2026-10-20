@@ -956,6 +956,12 @@ public:
     void RenderFrame();  //  Called from the window procedure.
     void PaintSurface(HDC dc);  //  Called from the window procedure.
     void CountTick() { ++m_timerTicks; }
+    ~JarvisHud() {
+        if (m_singleInstance) {
+            ReleaseMutex(m_singleInstance);
+            CloseHandle(m_singleInstance);
+        }
+    }
 
 private:
     //  --- configuration / data -----------------------------------------------
@@ -977,6 +983,10 @@ private:
     bool m_selftest = false;
     bool m_setNotice = false;
     int  m_durationMs = 0;
+
+    //  The named mutex that keeps a second copy of the panel off the
+    //  screen.  Held for as long as the process lives.
+    HANDLE m_singleInstance = nullptr;
 
     //  --- surfaces (destruction order matters, see the member order below) ----
     GdiplusSession                       m_gdi;         //  destroyed last
@@ -3189,6 +3199,21 @@ int JarvisHud::Run(HINSTANCE instance, const std::wstring& cmdLine) {
     m_cpuMark = WallMs();
     ParseCommandLine(cmdLine);
     Mark("cli");
+
+    //  ---- only one panel at a time ------------------------------------------
+    //  Two copies of the program would put two panels in the desktop band
+    //  and rotate two greetings.  The named mutex is released by the
+    //  kernel when the process dies, so a copy that was killed does not
+    //  block the next one.  The diagnostic modes do not put a panel on
+    //  the screen, so they are allowed to run alongside a live panel.
+    if (!m_selftest && !m_setNotice) {
+        m_singleInstance = CreateMutexW(nullptr, TRUE, L"Local\\JarvisHudPanel");
+        if (m_singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(m_singleInstance);
+            m_singleInstance = nullptr;
+            return 0;   //  A panel is already on the desktop.
+        }
+    }
 
     //  ---- locate the executable and its data files ---------------------------
     wchar_t pathBuf[4096];

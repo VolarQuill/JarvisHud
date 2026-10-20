@@ -384,6 +384,14 @@ corner from logon until you end it in Task Manager or shut the PC down.
 * The panel is started by the `HKCU\...\CurrentVersion\Run` entry that `install.ps1` writes, so
   it comes up with Windows like any other startup program. It does not need a task or a service,
   and it does not need administrator rights.
+* Only one panel is ever on the screen. The program takes a named mutex
+  (`Local\JarvisHudPanel`) when it starts and gives up straight away if another copy already
+  holds it, so starting it twice by hand cannot put two panels in the desktop band. The
+  diagnostic modes (`--selftest`, `--set-notice`) are exempt: they do not put a panel on the
+  screen.
+* It goes away when the PC shuts down. The program is an ordinary user process, so Windows
+  ends it with the session; it holds no service, no driver and no handle that would hold the
+  shutdown up.
 * The greeting is replaced every `rotate_seconds`. The new line is chosen with the same rules
   as the first one (eligible for the time of day, never the same line twice in a row), expanded
   afresh — so the clock in it is current — laid out again and typed out from the beginning. The
