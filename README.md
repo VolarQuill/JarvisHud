@@ -3,10 +3,11 @@
 JARVIS HUD is a small Win32/GDI+ program that paints a JARVIS-style greeting when you sign in to
 Windows 11: a cyan arc-reactor on the left, a typewriter-revealed greeting on the right, a status
 line and a clock, all drawn in code with GDI+ paths and text. It docks in a corner of the primary
-monitor's work area, never takes focus, and is click-through. It lives in the *desktop band* — on
+monitor's work area, never takes focus, and can be dragged anywhere with the left mouse button.
+It lives in the *desktop band* — on
 the wallpaper, above the icons, and below every application window — so whatever you open covers
-it completely and it never overlays anything. It starts with Windows, stays in its corner until
-you end it in Task Manager or shut the PC down, and replaces the greeting it is showing every
+it completely and it never overlays anything. It starts with Windows, stays where you put it
+until you end it in Task Manager or shut the PC down, and replaces the greeting it is showing every
 minute.
 
 ![The JARVIS HUD panel on the desktop](docs/preview.png)
@@ -281,6 +282,9 @@ at 96 DPI, 21 px at 125% scaling).
 | `status_font_size` | `11` | Logical pixel size of the status line, scaled by DPI. |
 | `position` | `top-left` | Which corner of the primary monitor's work area to dock to: `bottom-right`, `bottom-left`, `top-right`, `top-left` or `center`. |
 | `margin` | `32` | Logical pixels between the panel and the edge of the work area. |
+| `pos_x` | `-1` | The exact place of the panel, in logical pixels from the left edge of the work area. `-1` = use the corner named by `position`. The panel writes this itself when it is dragged somewhere, so it comes back in the same place the next time the machine starts. |
+| `pos_y` | `-1` | The exact place of the panel, in logical pixels from the top edge of the work area. `-1` = use the corner named by `position`. |
+| `reactor_speed` | `50` | How fast the arc reactor turns, as a percentage of its built-in speed. `100` is the speed it was written with, `50` is half of it. |
 | `panel_width` | `520` | Logical width of the panel, scaled by DPI. |
 | `panel_height` | `186` | Logical height of the panel, scaled by DPI. |
 | `fade_in_ms` | `450` | Duration of the fade-in, in milliseconds. |
@@ -329,7 +333,7 @@ authoritative list of what the program reads.
 The HUD is a deliberately polite overlay. The contract is:
 
 * **Not always-on-top.** The window is created with
-  `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT` and *no* `WS_EX_TOPMOST` and *no*
+  `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` and *no* `WS_EX_TOPMOST` and *no*
   `WS_EX_LAYERED`. There is no setting to turn either of those on: the panel is always an
   ordinary window, and the behaviour it produces is not configurable because it is the whole
   point of the program.
@@ -337,10 +341,13 @@ The HUD is a deliberately polite overlay. The contract is:
   `MA_NOACTIVATE`, the window is shown with `SW_SHOWNOACTIVATE`, and `SetForegroundWindow` is
   never called. Clicking on it, or on the desktop, or on another window, never moves the caret
   out of what you were typing in.
-* **Click-through.** `WS_EX_TRANSPARENT` makes the window transparent to mouse input: every click
-  and every hover reaches the window underneath. `WM_NCHITTEST` also answers `HTTRANSPARENT`, so
-  even the panel's own frame is click-through. The HUD can never swallow a click meant for
-  another application.
+* **Can be dragged.** The panel is taken hold of with the left mouse button and moved
+  anywhere on the screen; the place it is put in is written into `config.txt` as `pos_x` and
+  `pos_y`, so it comes back in the same place the next time the machine starts. The drag does
+  not move the panel out of the desktop band, so it can never end up over an application, and
+  `MA_NOACTIVATE` means the program you are typing in keeps the focus while you drag.
+  Everything that is *not* the panel is still click-through, and the panel only ever receives
+  the mouse where it is drawn.
 * **Out of the way.** `WS_EX_TOOLWINDOW` keeps it out of the taskbar and out of the Alt+Tab list.
   It is docked to a corner of the *work area* (the monitor rectangle minus the taskbar), so it
   never covers the middle of the screen and never lands on top of the taskbar.
@@ -609,10 +616,10 @@ If a specific application (typically a game or a video player in exclusive full 
 draws over the HUD, that application is topmost itself; the HUD is not.
 
 **It eats my clicks.**
-It should not — `WS_EX_TRANSPARENT` makes it click-through. If clicks are being swallowed,
-check that the installed exe is the one from this project (an older build without
-`WS_EX_TRANSPARENT` would behave differently) and that `position=center` has not put the panel
-over something you actually need to click.
+It should not — the panel is only in the way where it is drawn, and it has to be there to be
+dragged. If clicks are being swallowed, check that the installed exe is the one from this
+project (an older build that was click-through would behave differently) and that the panel has
+not been dragged over something you actually need to click.
 
 **Running it by hand for testing.**
 
@@ -700,7 +707,7 @@ Notes:
 
 ## Testing
 
-Six tools live in `tools/`. They are for development only; nothing in them is installed and
+Eight tools live in `tools/`. They are for development only; nothing in them is installed and
 the program does not depend on any of them.
 
 | file | what it does |
@@ -711,6 +718,8 @@ the program does not depend on any of them.
 | `tools/verify.ps1` | A one-line diagnostic: which greeting was chosen, the font, the DPI, the panel size and the memory the process is using. |
 | `tools/zorder.ps1` | Prints the visible top-level windows in z order, so the panel's place in the desktop band can be seen directly. |
 | `tools/devshot.ps1` | Renders a still of the panel without showing it on the screen. |
+| `tools/drag-panel.ps1` | Drags the panel with the left mouse button, by posting the mouse messages to its window, and prints the rectangle before and after. The messages are posted rather than injected, because injected clicks land wherever the real cursor happens to be while the person at the machine is using the mouse. |
+| `tools/screenshot.ps1` | A screenshot of the whole screen, in physical pixels, saved as a PNG. |
 
 ```powershell
 # build the cover window first
@@ -747,8 +756,8 @@ running undisturbed.
 ## Porting to Linux (CachyOS) — planned
 
 Not implemented. This is a design note for a future port, not a working feature. The Windows
-version relies on an ordinary window in the shell's desktop band and on `WS_EX_TRANSPARENT` for
-click-through; the Linux equivalents are different mechanisms, and a port is a rewrite of the
+version relies on an ordinary window in the shell's desktop band and on the drag handling of a
+plain window; the Linux equivalents are different mechanisms, and a port is a rewrite of the
 rendering and window-management layer, not a recompile.
 
 The intended shape:

@@ -154,7 +154,8 @@ try {
     $pw = $r.Right - $r.Left; $ph = $r.Bottom - $r.Top
 
     Check 'not topmost'   (($ex -band 0x8) -eq 0)        ("ex=0x{0:X8}" -f $ex)
-    Check 'click-through' (($ex -band 0x20) -ne 0)       ("WS_EX_TRANSPARENT={0}" -f (($ex -band 0x20) -ne 0))
+    #  The panel has to answer the mouse, or it could never be dragged.
+    Check 'answers the mouse' (($ex -band 0x20) -eq 0)  ("WS_EX_TRANSPARENT={0}" -f (($ex -band 0x20) -ne 0))
     Check 'no-activate'   (($ex -band 0x08000000) -ne 0) ("WS_EX_NOACTIVATE={0}" -f (($ex -band 0x08000000) -ne 0))
     #  The panel must be an ORDINARY window.  A layered window is blended
     #  by the desktop window manager in a pass of its own, after the
@@ -164,7 +165,9 @@ try {
     Check 'not layered'   (($ex -band 0x80000) -eq 0)     ("WS_EX_LAYERED={0}" -f (($ex -band 0x80000) -eq 0))
     Check 'never focused' ([A]::GetForegroundWindow() -ne $hud) 'the HUD does not take focus'
 
-    Check 'docked top-left' ($r.Left -le 96 -and $r.Top -le 96) ("rect = {0},{1} - {2},{3}  ({4}x{5})" -f `
+    #  The panel can be dragged anywhere, so it only has to be on the
+    #  screen - not in a corner in particular.
+    Check 'on the screen' ($r.Left -ge 0 -and $r.Top -ge 0 -and $r.Right -le 1920 -and $r.Bottom -le 1080) ("rect = {0},{1} - {2},{3}  ({4}x{5})" -f `
         $r.Left, $r.Top, $r.Right, $r.Bottom, $pw, $ph)
 
     # --- the desktop band ---------------------------------------------------

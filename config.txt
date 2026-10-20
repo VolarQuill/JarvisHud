@@ -40,6 +40,17 @@ position=top-left
 # Distance in logical pixels from the edge of the work area.
 margin=32
 
+# The exact place of the panel, in logical pixels from the top left
+# corner of the work area.  -1 means "use the corner named by
+# position above".
+#
+# The card can be dragged with the left mouse button, and wherever it
+# is put is written back into this file, so it comes back in the same
+# place the next time the machine starts.  The two values below are
+# the place it was last dragged to.
+pos_x=45
+pos_y=34
+
 # Logical width of the HUD panel, scaled by the display DPI.
 panel_width=520
 
@@ -53,6 +64,10 @@ fade_in_ms=450
 
 # Reactor spin-up and sweep-line duration, in milliseconds.
 boot_ms=1200
+
+# How fast the arc reactor turns, as a percentage of its built-in
+# speed.  100 is the speed it was written with, 50 is half of it.
+reactor_speed=50
 
 # Milliseconds per typed character in the typewriter reveal.
 type_ms=28

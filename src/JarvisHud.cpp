@@ -253,6 +253,11 @@ struct Config {
     int         statusFontSize = 11;
     std::wstring position      = L"top-left";
     int         margin         = 32;
+    //  The exact place of the panel, in logical pixels from the corner
+    //  of the work area.  -1 means "use the corner named by position".
+    //  The panel writes these itself when it is dragged somewhere else.
+    int         posX           = -1;
+    int         posY           = -1;
     int         panelWidth     = (int)kPanelW;
     int         panelHeight    = (int)kPanelH;
     int         fadeInMs       = 450;
@@ -284,6 +289,9 @@ struct Config {
     //  The panel puts the entry back on launch when it has gone missing,
     //  so that the greeting cannot silently stop coming up at logon.
     int         autostart      = 1;
+    //  How fast the reactor turns, in percent of its own speed.  100 is
+    //  the speed the panel was built with, 50 is half of it.
+    int         reactorSpeed   = 50;
 };
 
 bool IsKnownPosition(const std::wstring& p) {
@@ -302,6 +310,9 @@ void ApplyConfigLine(const std::wstring& keyRaw, const std::wstring& val, Config
         cfg.position = IsKnownPosition(p) ? p : L"top-left";
     }
     else if (key == L"margin")           cfg.margin = ParseInt(val, cfg.margin);
+    else if (key == L"pos_x")            cfg.posX = ParseInt(val, cfg.posX);
+    else if (key == L"pos_y")            cfg.posY = ParseInt(val, cfg.posY);
+    else if (key == L"reactor_speed")    cfg.reactorSpeed = ParseInt(val, cfg.reactorSpeed);
     else if (key == L"panel_width")      cfg.panelWidth = ParseInt(val, cfg.panelWidth);
     else if (key == L"panel_height")     cfg.panelHeight = ParseInt(val, cfg.panelHeight);
     else if (key == L"fade_in_ms")       cfg.fadeInMs = ParseInt(val, cfg.fadeInMs);
@@ -1065,6 +1076,10 @@ public:
     void RenderFrame();  //  Called from the window procedure.
     void PaintSurface(HDC dc);  //  Called from the window procedure.
     void CountTick() { ++m_timerTicks; }
+    //  Dragging the panel.  These are called from the window procedure.
+    bool  OnMouseDown(HWND hwnd);
+    bool  OnMouseMove(HWND hwnd);
+    bool  OnMouseUp(HWND hwnd);
     ~JarvisHud() {
         if (m_singleInstance) {
             ReleaseMutex(m_singleInstance);
@@ -1158,6 +1173,15 @@ private:
     //  UpdateLayeredWindow is given; the panel is a top level window, so
     //  that is screen coordinates.
     POINT m_screenDock = {0, 0};
+
+    //  --- dragging the panel ----------------------------------------------------
+    //  The mouse went down at this point, the window was here, and the
+    //  window is here now.  All in screen pixels.
+    bool  m_dragging = false;
+    bool  m_dragMoved = false;
+    int   m_dragStartX = 0, m_dragStartY = 0;
+    int   m_dragWindowX = 0, m_dragWindowY = 0;
+    int   m_dragX = 0, m_dragY = 0;
 
     //  --- layout ---------------------------------------------------------------
     TextLayout   m_layout;
@@ -1258,6 +1282,12 @@ private:
     bool  CreateWindowSurface(HINSTANCE instance);
     void  ApplyPanelRegion();
     void  ComputeDockPosition();
+    //  --- dragging the panel ---------------------------------------------------
+    //  The panel can be taken hold of with the left mouse button and
+    //  moved somewhere else.  The place it is put in is written into
+    //  the config file, so the panel comes back in the same place the
+    //  next time the machine starts.
+    void  SavePanelPosition();
     //  --- the desktop band ----------------------------------------------------
     bool  FindDesktopHost(int waitMs);
     bool  PlaceInDesktopBand();
@@ -2380,15 +2410,18 @@ void JarvisHud::RenderFrame() {
     alpha = std::max(0, std::min(255, alpha));
 
     //  Reactor rotation: spins up over the boot window, then idles.
+    //  The speed is a setting, because the ring looked too busy at the
+    //  speed it was built with.
+    const double speed = (m_cfg.reactorSpeed > 0 ? m_cfg.reactorSpeed : 100) / 100.0;
     double spinT = tg - m_bootStart;
     if (spinT < 0.0) spinT = 0.0;
     double travelled;
     if (boot > 0.0 && spinT < boot) {
-        const double rate = 60.0;  //  Degrees per second while spinning up.
+        const double rate = 60.0 * speed;  //  Degrees per second while spinning up.
         travelled = rate * spinT * spinT / (2.0 * boot);
     } else {
-        const double rate = (m_cfg.persist ? 12.0 : (tg < tTypeEnd ? 30.0 : 18.0));
-        travelled = (boot > 0.0 ? 60.0 * boot * 0.5 : 0.0) + rate * (spinT - boot);
+        const double rate = (m_cfg.persist ? 12.0 : (tg < tTypeEnd ? 30.0 : 18.0)) * speed;
+        travelled = (boot > 0.0 ? 30.0 * speed * boot : 0.0) + rate * (spinT - boot);
     }
     const double rotationDeg = travelled;
 
@@ -2592,9 +2625,35 @@ LRESULT CALLBACK HudWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_MOUSEACTIVATE:
+            //  The panel never takes the focus, not even while it is
+            //  being dragged.
             return MA_NOACTIVATE;
         case WM_NCHITTEST:
-            return HTTRANSPARENT;
+            //  The panel answers the mouse, so that it can be dragged.
+            //  It sits in the desktop band, so it is only ever in the
+            //  way of the desktop and never of an application.
+            return HTCLIENT;
+        case WM_LBUTTONDOWN: {
+            JarvisHud* app = (JarvisHud*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if (app) app->OnMouseDown(hwnd);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            JarvisHud* app = (JarvisHud*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if (app) app->OnMouseMove(hwnd);
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            JarvisHud* app = (JarvisHud*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if (app) app->OnMouseUp(hwnd);
+            return 0;
+        }
+        case WM_CAPTURECHANGED: {
+            //  The mouse was taken away, so the drag is over.
+            JarvisHud* app = (JarvisHud*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if (app) app->OnMouseUp(hwnd);
+            return 0;
+        }
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT: {
@@ -2642,10 +2701,12 @@ bool JarvisHud::CreateWindowSurface(HINSTANCE instance) {
     //  the panel is put into the desktop band, so every application
     //  window is above it.
     //
-    //  WS_EX_TRANSPARENT and the HTTRANSPARENT hit test make the mouse
-    //  pass through the panel, and WS_EX_NOACTIVATE keeps it from ever
-    //  taking the focus.
-    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+    //  The panel is not click through any more: it has to be possible to
+    //  take hold of it with the left mouse button and move it somewhere
+    //  else.  WS_EX_NOACTIVATE still keeps it from ever taking the
+    //  focus, so the person at the keyboard keeps typing into the
+    //  program they are working in.
+    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
     m_hwnd = CreateWindowExW(exStyle, L"JarvisHudWindowClass", L"JARVIS HUD", WS_POPUP, 0, 0, 1, 1,
                              nullptr, nullptr, instance, nullptr);
@@ -2955,9 +3016,139 @@ void JarvisHud::ComputeDockPosition() {
         x = work.right - margin - m_panelW;
         y = work.bottom - margin - m_panelH;
     }
+    //  An exact place wins over the named corner.  The panel writes
+    //  these itself when it is dragged somewhere else, so that it
+    //  comes back in the same place the next time the machine starts.
+    if (m_cfg.posX >= 0) x = work.left + (int)std::lround((float)m_cfg.posX * m_scale);
+    if (m_cfg.posY >= 0) y = work.top  + (int)std::lround((float)m_cfg.posY * m_scale);
     m_screenDock.x = x;
     m_screenDock.y = y;
     m_windowPos = m_screenDock;
+}
+
+//---------------------------------------------------------------------
+//  Dragging the panel
+//
+//  The panel is taken hold of with the left mouse button and moved
+//  somewhere else.  It stays in the desktop band while it is moved, so
+//  it can never end up above an application, and it never takes the
+//  focus: the window says MA_NOACTIVATE and the mouse is caught with
+//  SetCapture, so the person at the keyboard keeps typing into the
+//  program they are working in.
+//
+//  The place the panel is put in is written into the config file, so
+//  it comes back in the same place the next time the machine starts.
+//---------------------------------------------------------------------
+bool JarvisHud::OnMouseDown(HWND hwnd) {
+    if (!hwnd) return false;
+    POINT cur;
+    cur.x = cur.y = 0;
+    GetCursorPos(&cur);
+    RECT wr;
+    wr.left = wr.top = wr.right = wr.bottom = 0;
+    GetWindowRect(hwnd, &wr);
+
+    m_dragging = true;
+    m_dragMoved = false;
+    m_dragStartX = cur.x;
+    m_dragStartY = cur.y;
+    m_dragWindowX = wr.left;
+    m_dragWindowY = wr.top;
+    m_dragX = wr.left;
+    m_dragY = wr.top;
+    SetCapture(hwnd);
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "down: cursor=%ld,%ld window=%ld,%ld",
+                 (long)cur.x, (long)cur.y, (long)wr.left, (long)wr.top);
+        WriteLog(line);
+    }
+    return true;
+}
+
+bool JarvisHud::OnMouseMove(HWND hwnd) {
+    if (!m_dragging || !hwnd) return false;
+    POINT cur;
+    cur.x = cur.y = 0;
+    GetCursorPos(&cur);
+    const int dx = cur.x - m_dragStartX;
+    const int dy = cur.y - m_dragStartY;
+    //  A few pixels of jitter are a click, not a drag.
+    if (!m_dragMoved && (dx > 4 || dx < -4 || dy > 4 || dy < -4)) m_dragMoved = true;
+    if (!m_dragMoved) return false;
+
+    HMONITOR mon = MonitorFromPoint(cur, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) {
+        mi.rcWork.left = 0;
+        mi.rcWork.top = 0;
+        mi.rcWork.right = GetSystemMetrics(SM_CXSCREEN);
+        mi.rcWork.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    const RECT& work = mi.rcWork;
+    int x = m_dragWindowX + dx;
+    int y = m_dragWindowY + dy;
+    //  The panel has to stay on the screen.
+    if (x < work.left) x = work.left;
+    if (y < work.top) y = work.top;
+    if (x + m_panelW > work.right) x = work.right - m_panelW;
+    if (y + m_panelH > work.bottom) y = work.bottom - m_panelH;
+
+    m_dragX = x;
+    m_dragY = y;
+    m_screenDock.x = x;
+    m_screenDock.y = y;
+    m_windowPos = m_screenDock;
+    //  The z order is left alone: the panel stays in the desktop band.
+    SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return true;
+}
+
+bool JarvisHud::OnMouseUp(HWND hwnd) {
+    if (!m_dragging) return false;
+    //  The drag is over before the capture is let go: letting go sends
+    //  WM_CAPTURECHANGED, which comes straight back here.
+    m_dragging = false;
+    if (hwnd && GetCapture() == hwnd) ReleaseCapture();
+    if (m_dragMoved) SavePanelPosition();
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "up: moved=%d drag=%d,%d", m_dragMoved ? 1 : 0,
+                 m_dragX, m_dragY);
+        WriteLog(line);
+    }
+    return true;
+}
+
+//  Writes the place of the panel into the config file, so that it is
+//  put back in the same place the next time the machine starts.
+void JarvisHud::SavePanelPosition() {
+    HMONITOR mon = MonitorFromPoint(POINT{ m_dragX, m_dragY }, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) {
+        mi.rcWork.left = 0;
+        mi.rcWork.top = 0;
+        mi.rcWork.right = GetSystemMetrics(SM_CXSCREEN);
+        mi.rcWork.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    const int posX = (int)std::lround((float)(m_dragX - mi.rcWork.left) / m_scale);
+    const int posY = (int)std::lround((float)(m_dragY - mi.rcWork.top) / m_scale);
+    m_cfg.posX = posX;
+    m_cfg.posY = posY;
+
+    //  Only the installed copy keeps the place.  A build that is run
+    //  out of its own folder must not write into the sources.
+    if (!IsInstalledCopy(m_exeDir)) return;
+    const std::wstring path = m_exeDir + L"\\config.txt";
+    SaveConfigKey(path, L"pos_x", std::to_wstring(posX));
+    SaveConfigKey(path, L"pos_y", std::to_wstring(posY));
+    WriteLog("position saved: pos_x=" + NarrowUtf8(std::to_wstring(posX)) +
+             " pos_y=" + NarrowUtf8(std::to_wstring(posY)));
 }
 
 //---------------------------------------------------------------------
@@ -3294,6 +3485,14 @@ bool JarvisHud::ShowHud() {
 
     ComputeDockPosition();
     ApplyPanelRegion();
+    {
+        char line[256];
+        snprintf(line, sizeof(line),
+                 "dock: x=%ld y=%ld scale=%.3f panel=%dx%d posX=%d posY=%d margin=%d",
+                 (long)m_screenDock.x, (long)m_screenDock.y, (double)m_scale, m_panelW, m_panelH,
+                 m_cfg.posX, m_cfg.posY, m_cfg.margin);
+        WriteLog(line);
+    }
 
     //  ---- the desktop band --------------------------------------------------
     //  The panel belongs to the desktop, so it is put into the band that
