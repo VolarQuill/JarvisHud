@@ -9,6 +9,8 @@ it completely and it never overlays anything. It starts with Windows, stays in i
 you end it in Task Manager or shut the PC down, and replaces the greeting it is showing every
 minute.
 
+![The JARVIS HUD panel on the desktop](docs/preview.png)
+
 ```
         ╭────────────────────────────────────────────────────────────────────────────╮
         │ ╭────────────────────────────────────────────────────────────────────────╮ │
@@ -99,7 +101,7 @@ Default install location: `%LOCALAPPDATA%\JarvisHud` (i.e. `C:\Users\<you>\AppDa
        -lgdiplus -luser32 -lgdi32 -lole32 -luuid
    ```
 
-   Run that from the project root (`C:/Users/<you>/projects/jarvis-hud`) inside an MSYS2 UCRT64 shell.
+   Run that from the project root (the folder that holds `src/`) inside an MSYS2 UCRT64 shell.
    The library flags must come *after* the source file. `-municode` selects the wide-argument
    entry point and `-mwindows` makes it a GUI-subsystem binary, so no console window appears.
    To check for warnings, add `-Wall -Wextra`.
@@ -615,7 +617,7 @@ package (or the full `msys2-devel` group), which provides `g++` and the UCRT64 r
 # in an MSYS2 UCRT64 shell (or run "MSYS2 UCRT64" from the Start menu)
 pacman -S --needed mingw-w64-ucrt-x86_64-toolchain
 
-cd /c/Users/<you>/projects/jarvis-hud
+cd /path/to/jarvis-hud
 /c/msys64/ucrt64/bin/g++ -std=c++17 -O2 -municode -mwindows \
     -o JarvisHud.exe src/JarvisHud.cpp \
     -lgdiplus -luser32 -lgdi32 -lole32 -luuid
@@ -731,3 +733,11 @@ Known open questions for the port: how to make the overlay appear *before* the s
 (the analogue of the Windows logon screen is the display manager, and a user unit cannot paint
 over the greeter), and how to guarantee that the overlay is not raised above application windows
 once the session is up.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+The JARVIS look belongs to its creators; this is a fan-made homage, not an official product.
