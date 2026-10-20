@@ -2,6 +2,10 @@
 JarvisHud.exe
 *.o
 *.obj
+tools/cover.exe
+
+# frames the self test writes next to the executable
+JarvisHud_frame*.png
 
 # runtime diagnostics
 selftest.log

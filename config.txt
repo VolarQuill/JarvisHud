@@ -71,9 +71,12 @@ dismiss_ms=0
 
 # --- Behaviour -----------------------------------------------------
 
-# 1 = keep the HUD on screen as a small corner widget after the
-# greeting has been shown. 0 = show the greeting once and exit.
-persist=0
+# 1 = keep the HUD on screen for ever after the greeting has been
+# shown. The panel stays in the top-left corner, the reactor keeps
+# turning and the greeting is replaced every rotate_seconds. It only
+# goes away when you end it in Task Manager or shut the PC down.
+# 0 = show the greeting once and exit.
+persist=1
 
 # 1 = show the current time on the status line. 0 = hide it.
 show_clock=1
@@ -82,10 +85,34 @@ show_clock=1
 # placeholder in greetings.txt.
 status_text=SYSTEM ONLINE
 
-# 1 = keep the HUD above other windows (WS_EX_TOPMOST).
-# 0 = the default. The HUD is then coverable by any application you
-# open, and it never steals focus or blocks mouse clicks.
-always_on_top=0
+# --- The desktop band ----------------------------------------------
+
+# The panel always sits in the DESKTOP BAND: above the wallpaper and
+# the desktop icons and below every application window. Whatever you
+# open covers it completely, and it never steals focus or blocks mouse
+# clicks. The panel re-asserts its place once a second, because the
+# shell raises its own desktop window from time to time.
+#
+# There is deliberately no setting for this. The window is never
+# topmost and never layered, because a layered window is blended by
+# the desktop window manager in a pass of its own and would float
+# above every application window.
+
+# How long to wait for the shell's desktop window to show up at logon.
+# The panel stays hidden until it is in the band, and it goes up as
+# soon as the shell is there. In milliseconds.
+desktop_wait_ms=8000
+
+# The line of greetings.txt the panel greets you with when it comes
+# up, counted from one. Line 1 is "Welcome back, sir.".
+# 0 = pick one at random instead.
+greeting_line=1
+
+# How often the persistent panel replaces the greeting it is showing
+# with another one from greetings.txt. The new line is typed out from
+# the beginning; the panel itself never moves or flickers.
+# 0 = never rotate, show the first greeting for ever.
+rotate_seconds=60
 
 # 1 = also write the chosen greeting to the Winlogon
 # LegalNoticeText value, which is displayed by Windows before the

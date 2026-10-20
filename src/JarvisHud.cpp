@@ -12,21 +12,23 @@
 //
 //  Behaviour summary
 //  -----------------
-//   * Layered window docked to a corner of the primary monitor's WORK
-//     AREA (never over the taskbar).
-//   * WS_EX_NOACTIVATE + WS_EX_TRANSPARENT: it never takes focus and
-//     never swallows a mouse click.
-//   * WS_EX_TOPMOST is OFF by default; the window is raised exactly once
-//     (SetWindowPos/HWND_TOP) so the logon shell stays visible above it
-//     and any application started later covers it.
+//   * Ordinary window (deliberately NOT layered and NOT topmost) docked
+//     to a corner of the primary monitor's WORK AREA (never over the
+//     taskbar).
+//   * The window is put into the desktop band: directly above the
+//     shell's own desktop window, so it belongs to the desktop and is
+//     below every running application.  It is only ever shown while it
+//     is in that band.
+//   * WS_EX_NOACTIVATE + WS_EX_TRANSPARENT + HTTRANSPARENT: it never
+//     takes focus and never swallows a mouse click.
 //   * Two layer rendering: a static base (panel, border, brackets, grid,
 //     separator, ambient bloom) rendered once, and a dynamic layer (arc
 //     reactor, sweep line, greeting, status, clock) redrawn per frame.
 //   * GDI+ renders into a 32bpp ARGB surface; the frame is premultiplied
-//     before it is handed to UpdateLayeredWindow(ULW_ALPHA) which
-//     requires premultiplied data.  The alpha convention GDI+ actually
-//     uses for the surface is probed at runtime (see ProbeGdiAlpha) so
-//     the frame is composited correctly either way.
+//     and composed in software, then flattened onto the colour of the
+//     card and painted into the window.  A layered window would be
+//     blended by the desktop window manager in a pass of its own and
+//     would float above every application, which is not allowed.
 //
 //  Every failure path exits silently with exit code 0.
 //======================================================================
@@ -114,6 +116,18 @@ inline Gdiplus::Color ColScaled(const Rgba& c, int alpha) {
 
 inline double ClampD(double v, double lo, double hi) {
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+inline BYTE ClampByte(int v) {
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (BYTE)v;
+}
+
+//  Mixes a difference into a channel: v * fade / 255, rounded.
+inline int MixRound(int delta, int fade) {
+    const int p = delta * fade;
+    return (p >= 0) ? ((p + 127) / 255) : ((p - 127) / 255);
 }
 
 }  // namespace
@@ -250,8 +264,22 @@ struct Config {
     int         persist        = 0;
     int         showClock      = 1;
     std::wstring statusText    = L"SYSTEM ONLINE";
-    int         alwaysOnTop    = 0;
     int         noticeText     = 0;
+    //  greetingLine: the line of greetings.txt the panel greets you
+    //  with when it comes up, counted from one.  0 picks one at random.
+    int         greetingLine   = 1;
+    //  The panel is always put into the desktop band, that is directly
+    //  above the shell's desktop window, so that it belongs to the
+    //  desktop and is therefore behind every application window.  There
+    //  is deliberately no switch for it: the panel must never end up
+    //  above a running application.
+    //
+    //  rotateSeconds: while the panel persists, swap to a new greeting
+    //  every N seconds.  0 keeps the first greeting for ever.
+    int         rotateSeconds  = 60;
+    //  desktopWaitMs: how long to wait for the shell's desktop window to
+    //  appear at logon before falling back to the top level popup.
+    int         desktopWaitMs  = 3000;
 };
 
 bool IsKnownPosition(const std::wstring& p) {
@@ -281,8 +309,10 @@ void ApplyConfigLine(const std::wstring& keyRaw, const std::wstring& val, Config
     else if (key == L"persist")          cfg.persist = ParseInt(val, cfg.persist);
     else if (key == L"show_clock")       cfg.showClock = ParseInt(val, cfg.showClock);
     else if (key == L"status_text")      cfg.statusText = val;
-    else if (key == L"always_on_top")    cfg.alwaysOnTop = ParseInt(val, cfg.alwaysOnTop);
     else if (key == L"notice_text")      cfg.noticeText = ParseInt(val, cfg.noticeText);
+    else if (key == L"greeting_line")    cfg.greetingLine = ParseInt(val, cfg.greetingLine);
+    else if (key == L"rotate_seconds")   cfg.rotateSeconds = ParseInt(val, cfg.rotateSeconds);
+    else if (key == L"desktop_wait_ms")  cfg.desktopWaitMs = ParseInt(val, cfg.desktopWaitMs);
     //  Unknown keys are ignored on purpose.
 }
 
@@ -924,6 +954,7 @@ class JarvisHud {
 public:
     int  Run(HINSTANCE instance, const std::wstring& cmdLine);
     void RenderFrame();  //  Called from the window procedure.
+    void PaintSurface(HDC dc);  //  Called from the window procedure.
     void CountTick() { ++m_timerTicks; }
 
 private:
@@ -935,6 +966,10 @@ private:
     std::wstring  m_fontFamilyName;
     Expanded      m_greeting;
     std::vector<GreetingLine> m_corpus;
+    //  The indices into m_corpus that are eligible for the current part of
+    //  the day.  Kept so that a rotating greeting can pick a new line
+    //  without re-reading the corpus.
+    std::vector<int> m_candidates;
     size_t        m_greetingIndex = 0;
     bool          m_configLoaded = false;
 
@@ -946,7 +981,8 @@ private:
     //  --- surfaces (destruction order matters, see the member order below) ----
     GdiplusSession                       m_gdi;         //  destroyed last
     DibSurface                           m_baseDib;    //  static layer, top down
-    DibSurface                           m_outDib;     //  the frame, bottom up, handed to ULW
+    DibSurface                           m_outDib;     //  the frame, bottom up, premultiplied
+    DibSurface                           m_blitDib;    //  the frame, top down, opaque, painted
     DibSurface                           m_rotorDib;   //  premultiplied ring sprite
     std::unique_ptr<Gdiplus::Bitmap>     m_baseBmp;
     std::unique_ptr<Gdiplus::Bitmap>     m_coreBmp;    //  cached white hot core
@@ -980,6 +1016,24 @@ private:
     bool  m_present = true;      //  false while self testing
     bool  m_gdiPremultiplies = false;
     BYTE  m_probeArgb[4] = {0, 0, 0, 0};  //  raw sample of the alpha probe
+    //  How strongly the panel is drawn, 0 to 255.  A window that is not
+    //  layered cannot be transparent, so the fade is done by mixing the
+    //  panel into the colour of the card.
+    int   m_frameFade = 255;
+
+    //  --- the desktop band ----------------------------------------------------
+    //  The panel is an ordinary top level window that is placed directly
+    //  above the shell's desktop window in the z order.  That is the
+    //  "desktop band": above the wallpaper and the desktop icons, and
+    //  below every application window.
+    HWND  m_desktopHost = nullptr;  //  the shell's "Progman" window
+    HWND  m_iconHost   = nullptr;  //  "SHELLDLL_DefView", the icon container
+    bool  m_inBand     = false;  //  the panel sits in the desktop band
+    ULONGLONG m_hostCheckTick = 0;  //  when the host was last looked at
+    //  The dock position in screen coordinates.  m_windowPos is what
+    //  UpdateLayeredWindow is given; the panel is a top level window, so
+    //  that is screen coordinates.
+    POINT m_screenDock = {0, 0};
 
     //  --- layout ---------------------------------------------------------------
     TextLayout   m_layout;
@@ -1010,12 +1064,27 @@ private:
     ULONGLONG m_lastPresentTick = 0;
     double    m_holdIntervalMs = 0.0;
 
+    //  --- greeting rotation -----------------------------------------------------
+    //  The greeting has a clock of its own so that it can be replaced while
+    //  the panel stays on the screen.  m_greetingTick is the moment the
+    //  current greeting started, m_bootStart the offset at which its boot
+    //  animation begins (the first greeting waits for the fade-in, every
+    //  later one starts immediately).
+    ULONGLONG m_greetingTick = 0;
+    double    m_bootStart = 0.0;
+    int       m_rotations = 0;
+    //  The factor the whole timeline is scaled by, so that --duration can
+    //  stretch or squeeze the animation into a fixed lifetime.  It is
+    //  computed once, from the first greeting, and never changes.
+    double    m_timeScale = 1.0;
+
     //  --- frame profiling (filled in by the self test) -------------------------
     double m_profRestore = 0.0;
     double m_profGdi = 0.0;
     double m_profRotor = 0.0;
     double m_profPremul = 0.0;
     double m_profPresent = 0.0;
+    double m_profFlatten = 0.0;
     int    m_profFrames = 0;
     double m_cpuSetupMs = 0.0;
 
@@ -1026,6 +1095,7 @@ private:
 
     void  ResetProfile() {
         m_profRestore = m_profGdi = m_profRotor = m_profPremul = m_profPresent = 0.0;
+        m_profFlatten = 0.0;
         m_profFrames = 0;
     }
 
@@ -1047,7 +1117,6 @@ private:
     void  BlendRect(int dstX, int dstY, const DWORD* src, int srcStride, int srcW, int srcH,
                     int srcX, int srcY, int w, int h);
     void  BlendSolidRow(int imgY, int alpha, BYTE r, BYTE g, BYTE b);
-    void  ScaleFrameAlpha(int alphaScale);
     void  DrawRotorSprite(double rotationDeg);
     void  DrawSweepSoftware(double sweepY, double alpha);
     void  DrawGreetingRuns(Gdiplus::Graphics& g, int visibleChars, float originX, float originY,
@@ -1055,13 +1124,22 @@ private:
     void  DrawGreetingSoftware(int visibleChars);
     void  DrawStatusSoftware();
     bool  BuildStatusBitmap();
+    void  FlattenFrame(int fade);
     void  Present();
-    bool  CheckLifetime(double t, double tEnd);
+    bool  CheckLifetime(double tGlobal, double tLocal, double tLocalEnd);
     void  RestoreZone(int x, int y, int w, int h);
     void  PremultiplyZone(int x, int y, int w, int h, int alphaScale);
     bool  PrepareTypography();
     bool  CreateWindowSurface(HINSTANCE instance);
+    void  ApplyPanelRegion();
     void  ComputeDockPosition();
+    //  --- the desktop band ----------------------------------------------------
+    bool  FindDesktopHost(int waitMs);
+    bool  PlaceInDesktopBand();
+    void  UpdateWindowPlacement();
+    void  RefreshDesktopHost();
+    //  --- greeting rotation ---------------------------------------------------
+    bool  ChooseNextGreeting();
     int   RunSelfTest();
     int   RunSetNotice();
     bool  ShowHud();
@@ -1111,14 +1189,17 @@ bool JarvisHud::SetupSurfaces() {
     if (!m_screenDc) return false;
 
     //  The static layer is kept top down (that is the orientation GDI+
-    //  expects), the frame that is handed to UpdateLayeredWindow is
-    //  stored bottom up (that is what the compositor expects).
+    //  expects), the frame that is composed in software is stored bottom
+    //  up and the frame that is painted on the screen is stored top down
+    //  in a second buffer, because the window is an ordinary window and
+    //  not a layered one.
     if (!m_baseDib.Create(m_screenDc, m_panelW, m_panelH, true)) return false;
     if (!m_outDib.Create(m_screenDc, m_panelW, m_panelH, false)) return false;
+    if (!m_blitDib.Create(m_screenDc, m_panelW, m_panelH, true)) return false;
 
     //  PixelFormat32bppPARGB makes GDI+ store premultiplied samples,
-    //  which is exactly what UpdateLayeredWindow(ULW_ALPHA) expects and
-    //  what the software blend of the rotating ring needs.
+    //  which is what the software blend of the rotating ring needs and
+    //  what the flattening of the frame works on.
     m_baseBmp.reset(new Gdiplus::Bitmap(m_panelW, m_panelH, m_panelW * 4,
                                          PixelFormat32bppPARGB, m_baseDib.bits));
     if (!m_baseBmp) return false;
@@ -1720,37 +1801,20 @@ void JarvisHud::BlendSolidRow(int imgY, int alpha, BYTE r, BYTE g, BYTE b) {
     for (int x = 0; x < m_outDib.w; ++x) {
         const DWORD dv = row[x];
         const BYTE da = (BYTE)(dv >> 24);
-        const BYTE nr = (BYTE)(sr + PremulChannel((BYTE)(dv & 0xFFu), inv));
+        //  The sample is 0xAARRGGBB: red is in bits 16-23, blue in bits
+        //  0-7.  The named channels have to go into the same places.
+        const BYTE nr = (BYTE)(sr + PremulChannel((BYTE)((dv >> 16) & 0xFFu), inv));
         const BYTE ng = (BYTE)(sg + PremulChannel((BYTE)((dv >> 8) & 0xFFu), inv));
-        const BYTE nb = (BYTE)(sb + PremulChannel((BYTE)((dv >> 16) & 0xFFu), inv));
+        const BYTE nb = (BYTE)(sb + PremulChannel((BYTE)(dv & 0xFFu), inv));
         const BYTE na = (BYTE)(sa + PremulChannel(da, inv));
-        row[x] = ((DWORD)na << 24) | ((DWORD)nb << 16) | ((DWORD)ng << 8) | (DWORD)nr;
+        row[x] = ((DWORD)na << 24) | ((DWORD)nr << 16) | ((DWORD)ng << 8) | (DWORD)nb;
     }
 }
 
-//  Scales the alpha of the whole frame.  The samples are premultiplied,
-//  so the colour has to shrink with the alpha or the panel would stay
-//  bright while it fades out.
-void JarvisHud::ScaleFrameAlpha(int alphaScale) {
-    if (alphaScale >= 255 || !m_outDib.bits) return;
-    BYTE table[256];
-    for (int i = 0; i < 256; ++i)
-        table[i] = (BYTE)(((DWORD)i * (DWORD)alphaScale * 257u + 32768u) >> 16);
-    const size_t n = (size_t)m_outDib.w * (size_t)m_outDib.h;
-    DWORD* p = (DWORD*)m_outDib.bits;
-    for (size_t i = 0; i < n; ++i) {
-        const DWORD px = p[i];
-        const BYTE a = (BYTE)(px >> 24);
-        if (a == 0) continue;
-        const BYTE na = table[a];
-        if (na == 0) {
-            p[i] = 0;
-            continue;
-        }
-        p[i] = ((DWORD)na << 24) | ((DWORD)table[(px >> 16) & 0xFF] << 16) |
-               ((DWORD)table[(px >> 8) & 0xFF] << 8) | (DWORD)table[px & 0xFF];
-    }
-}
+//  The frame used to be faded by scaling the alpha of every sample,
+//  which only works for a layered window.  The window is not layered
+//  any more, so the fade is done by FlattenFrame(), which mixes the
+//  panel into the colour of the card.
 
 //  The scan line that travels down the panel while the reactor spins up.
 void JarvisHud::DrawSweepSoftware(double sweepY, double alpha) {
@@ -1994,19 +2058,96 @@ void JarvisHud::RestoreZone(int x, int y, int w, int h) {
     }
 }
 
+//---------------------------------------------------------------------
+//  Flattening and painting
+//
+//  The panel is composed in premultiplied alpha, but the window it is
+//  painted into is an ordinary window.  That is not a detail: a
+//  layered window (WS_EX_LAYERED) is blended by the desktop window
+//  manager in a pass of its own, which puts it in front of every
+//  ordinary window no matter what the z order says.  A panel that has
+//  to stay behind the running applications therefore cannot be layered.
+//
+//  So the frame is flattened onto the colour of the card and painted
+//  opaque.  The corners are cut away by the window region, and the
+//  fade is a mix between the card and the finished panel, because a
+//  window that is not layered cannot be made transparent.
+//---------------------------------------------------------------------
+void JarvisHud::FlattenFrame(int fade) {
+    if (!m_outDib.bits || !m_blitDib.bits) return;
+    if (fade < 0) fade = 0;
+    if (fade > 255) fade = 255;
+
+    const int w = m_panelW, h = m_panelH;
+    if (w <= 0 || h <= 0) return;
+
+    const int srcStride = m_outDib.w * 4;
+    const int dstStride = m_blitDib.w * 4;
+    const int br = kPanelFill.r, bg = kPanelFill.g, bb = kPanelFill.b;
+
+    //  Both steps of the flattening are tables.  The card under the
+    //  panel depends only on the alpha of the sample, and the fade
+    //  only on the value of the channel, so the whole frame is put
+    //  together with lookups and without a single division.
+    static BYTE overR[256], overG[256], overB[256];
+    static bool overReady = false;
+    if (!overReady) {
+        for (int a = 0; a < 256; ++a) {
+            overR[a] = (BYTE)((br * (255 - a) + 127) / 255);
+            overG[a] = (BYTE)((bg * (255 - a) + 127) / 255);
+            overB[a] = (BYTE)((bb * (255 - a) + 127) / 255);
+        }
+        overReady = true;
+    }
+
+    BYTE fadeR[256], fadeG[256], fadeB[256];
+    for (int v = 0; v < 256; ++v) {
+        fadeR[v] = ClampByte(br + MixRound(v - br, fade));
+        fadeG[v] = ClampByte(bg + MixRound(v - bg, fade));
+        fadeB[v] = ClampByte(bb + MixRound(v - bb, fade));
+    }
+
+    for (int y = 0; y < h; ++y) {
+        //  The composed frame is stored bottom up, the painted one top
+        //  down, so the rows have to be read the other way round.
+        const DWORD* s = (const DWORD*)(m_outDib.bits + (size_t)(h - 1 - y) * (size_t)srcStride);
+        DWORD* d = (DWORD*)(m_blitDib.bits + (size_t)y * (size_t)dstStride);
+        for (int x = 0; x < w; ++x) {
+            const DWORD p = s[x];
+            const int sa = (int)(p >> 24);
+            const int cr = (int)((p >> 16) & 0xFFu) + overR[sa];
+            const int cg = (int)((p >> 8) & 0xFFu) + overG[sa];
+            const int cb = (int)(p & 0xFFu) + overB[sa];
+            d[x] = 0xFF000000u | ((DWORD)fadeR[cr] << 16) | ((DWORD)fadeG[cg] << 8) |
+                   (DWORD)fadeB[cb];
+        }
+    }
+}
+
+//  Paints the finished frame into the window.
+void JarvisHud::PaintSurface(HDC dc) {
+    if (!dc || !m_blitDib.bits || m_panelW <= 0 || m_panelH <= 0) return;
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = m_panelW;
+    bi.bmiHeader.biHeight = -m_panelH;   //  Negative = top down.
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    SetDIBitsToDevice(dc, 0, 0, m_panelW, m_panelH, 0, 0, 0, m_panelH,
+                      m_blitDib.bits, &bi, DIB_RGB_COLORS);
+}
+
 void JarvisHud::Present() {
-    if (!m_present || !m_hwnd || !m_outDib.dc) return;
-    BLENDFUNCTION blend;
-    blend.BlendOp = AC_SRC_OVER;
-    blend.BlendFlags = 0;
-    blend.SourceConstantAlpha = 255;
-    blend.AlphaFormat = AC_SRC_ALPHA;
-    POINT dst = m_windowPos;
-    SIZE size;
-    size.cx = m_panelW;
-    size.cy = m_panelH;
-    POINT src = {0, 0};
-    UpdateLayeredWindow(m_hwnd, m_screenDc, &dst, &size, m_outDib.dc, &src, 0, &blend, ULW_ALPHA);
+    if (!m_present || !m_hwnd || !m_outDib.bits) return;
+    LARGE_INTEGER f0, f1;
+    QueryPerformanceCounter(&f0);
+    FlattenFrame(m_frameFade);
+    QueryPerformanceCounter(&f1);
+    m_profFlatten += (double)(f1.QuadPart - f0.QuadPart) * (1000.0 / CpuFrequency());
+    RedrawWindow(m_hwnd, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_NOCHILDREN);
 }
 
 //---------------------------------------------------------------------
@@ -2016,52 +2157,87 @@ void JarvisHud::RenderFrame() {
     if (!m_hwnd || !m_baseBmp) return;
 
     const ULONGLONG now = GetTickCount64();
+
+    //  ---- the desktop band ---------------------------------------------------
+    //  The panel has to stay in the band: the shell raises its own desktop
+    //  window from time to time, which would push the panel behind the
+    //  wallpaper.  The check is cheap and runs once a second.
+    //
+    //  If the shell has not turned up yet the panel is not shown at all,
+    //  and it is put on the screen as soon as the band is there.  That
+    //  way the panel is never on the screen outside the band, which is
+    //  the only place it is allowed to be.
+    if (now - m_hostCheckTick >= 1000) {
+        m_hostCheckTick = now;
+        if (m_inBand) {
+            RefreshDesktopHost();
+        } else if (FindDesktopHost(0) && PlaceInDesktopBand()) {
+            //  The shell turned up: the panel may go on the screen now.
+            ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+            UpdateWindowPlacement();
+            m_fullInit = true;
+        }
+    }
+
+    //  ---- a new greeting ----------------------------------------------------
+    if (m_cfg.rotateSeconds > 0 && m_greetingTick != 0) {
+        const ULONGLONG due = m_greetingTick + (ULONGLONG)m_cfg.rotateSeconds * 1000ULL;
+        if (now >= due) {
+            //  Only swap once the greeting has been typed out, so that a
+            //  long line is never cut off half way through.
+            const double since = (double)(now - m_greetingTick);
+            const double typeDur = (double)std::max(1, m_cfg.typeMs) * m_timeScale *
+                                   (double)m_greeting.text.size();
+            const double spinUp = (double)std::max(0, m_cfg.bootMs) * m_timeScale;
+            if (since >= m_bootStart + spinUp + typeDur) {
+                ChooseNextGreeting();
+            }
+        }
+    }
+
+    //  Two clocks.  The global one runs from the moment the panel was
+    //  shown and drives the fade in and the lifetime of the process.  The
+    //  local one runs from the moment the greeting on screen started and
+    //  drives the boot, the typing and the hold, so that a greeting can
+    //  be replaced while the panel stays where it is.
     const double t = (double)(now - m_startTick);
+    const double tg = m_greetingTick ? (double)(now - m_greetingTick) : t;
 
     //  ---- timeline -----------------------------------------------------------
-    double fadeIn = (double)std::max(0, m_cfg.fadeInMs);
-    double boot = (double)std::max(0, m_cfg.bootMs);
+    const double fadeIn = (double)std::max(0, m_cfg.fadeInMs) * m_timeScale;
+    const double boot = (double)std::max(0, m_cfg.bootMs) * m_timeScale;
     const int charCount = (int)m_greeting.text.size();
-    double typeDur = (double)std::max(1, m_cfg.typeMs) * (double)charCount;
-    double hold = (double)std::max(0, m_cfg.holdMs);
-    double fadeOut = (double)std::max(0, m_cfg.fadeOutMs);
+    const double typeStep = (double)std::max(1, m_cfg.typeMs) * m_timeScale;
+    const double typeDur = typeStep * (double)charCount;
+    const double hold = (double)std::max(0, m_cfg.holdMs) * m_timeScale;
+    const double fadeOut = (double)std::max(0, m_cfg.fadeOutMs) * m_timeScale;
 
-    double tBootEnd = fadeIn + boot;
-    double tTypeEnd = tBootEnd + typeDur;
-    double tHoldEnd = tTypeEnd + hold;
-    double tEnd = tHoldEnd + fadeOut;
-
-    //  --duration compresses the whole timeline into the requested lifetime.
-    if (m_durationMs > 0 && tEnd > 0.0) {
-        const double k = (double)m_durationMs / tEnd;
-        fadeIn *= k; boot *= k; typeDur *= k; hold *= k; fadeOut *= k;
-        tBootEnd = fadeIn + boot;
-        tTypeEnd = tBootEnd + typeDur;
-        tHoldEnd = tTypeEnd + hold;
-        tEnd = tHoldEnd + fadeOut;
-    }
+    const double tBootEnd = m_bootStart + boot;
+    const double tTypeEnd = tBootEnd + typeDur;
+    const double tHoldEnd = tTypeEnd + hold;
+    const double tEnd = tHoldEnd + fadeOut;
 
     int alpha = 255;
     bool fading = false;
     if (t < fadeIn) {
         alpha = (int)(255.0 * (fadeIn > 0.0 ? t / fadeIn : 1.0));
         fading = true;
-    } else if (!m_cfg.persist && t >= tHoldEnd && t < tEnd) {
-        const double f = fadeOut > 0.0 ? (t - tHoldEnd) / fadeOut : 1.0;
+    } else if (!m_cfg.persist && tg >= tHoldEnd && tg < tEnd) {
+        const double f = fadeOut > 0.0 ? (tg - tHoldEnd) / fadeOut : 1.0;
         alpha = (int)(255.0 * (1.0 - ClampD(f, 0.0, 1.0)));
         fading = true;
     }
     alpha = std::max(0, std::min(255, alpha));
 
     //  Reactor rotation: spins up over the boot window, then idles.
-    double spinT = t - fadeIn;
+    double spinT = tg - m_bootStart;
     if (spinT < 0.0) spinT = 0.0;
     double travelled;
     if (boot > 0.0 && spinT < boot) {
         const double rate = 60.0;  //  Degrees per second while spinning up.
         travelled = rate * spinT * spinT / (2.0 * boot);
     } else {
-        const double rate = (m_cfg.persist ? 12.0 : (t < tTypeEnd ? 30.0 : 18.0));
+        const double rate = (m_cfg.persist ? 12.0 : (tg < tTypeEnd ? 30.0 : 18.0));
         travelled = (boot > 0.0 ? 60.0 * boot * 0.5 : 0.0) + rate * (spinT - boot);
     }
     const double rotationDeg = travelled;
@@ -2070,9 +2246,9 @@ void JarvisHud::RenderFrame() {
     bool sweepActive = false;
     double sweepY = 0.0;
     double sweepAlpha = 0.0;
-    if (t >= fadeIn && t < tBootEnd && boot > 0.0) {
+    if (tg >= m_bootStart && tg < tBootEnd && boot > 0.0) {
         sweepActive = true;
-        const double f = (t - fadeIn) / boot;
+        const double f = (tg - m_bootStart) / boot;
         sweepY = f * (double)m_panelH;
         sweepAlpha = 1.0;
         const double edge = std::min(f, 1.0 - f) * 6.0;
@@ -2081,9 +2257,9 @@ void JarvisHud::RenderFrame() {
 
     //  Typed character count
     int typed = 0;
-    if (t >= tBootEnd) {
-        const double since = t - tBootEnd;
-        typed = (int)std::floor(since / (double)std::max(1, m_cfg.typeMs));
+    if (tg >= tBootEnd) {
+        const double since = tg - tBootEnd;
+        typed = (int)std::floor(since / typeStep);
         if (typed > charCount) typed = charCount;
     }
 
@@ -2092,14 +2268,14 @@ void JarvisHud::RenderFrame() {
     //  full animation rate.  Ten frames a second are plenty for a ring
     //  that turns at eighteen degrees per second and they save a third
     //  of the animation's CPU time.
-    if (m_cfg.persist || t < tTypeEnd || t >= tHoldEnd) {
+    if (m_cfg.persist || tg < tTypeEnd || tg >= tHoldEnd) {
         m_holdIntervalMs = 0.0;
     } else {
         m_holdIntervalMs = kHoldRedrawMs;
     }
     if (m_holdIntervalMs > 0.0 && m_lastPresentTick != 0 &&
         (double)(now - m_lastPresentTick) < m_holdIntervalMs) {
-        CheckLifetime(t, tEnd);
+        CheckLifetime(t, tg, tEnd);
         return;
     }
 
@@ -2181,7 +2357,10 @@ void JarvisHud::RenderFrame() {
     QueryPerformanceCounter(&pc3);
 
     //  ---- fade and present ---------------------------------------------------
-    if (alpha < 255) ScaleFrameAlpha(alpha);
+    //  The window is not layered, so it cannot be made transparent.  The
+    //  fade is done when the frame is flattened: the panel is mixed into
+    //  the colour of the card, which reads as the panel powering up.
+    m_frameFade = alpha;
     QueryPerformanceCounter(&pc4);
     Present();
     QueryPerformanceCounter(&pc5);
@@ -2204,22 +2383,24 @@ void JarvisHud::RenderFrame() {
     ++m_framesDrawn;
 
     //  ---- lifetime -----------------------------------------------------------
-    CheckLifetime(t, tEnd);
+    CheckLifetime(t, tg, tEnd);
 }
 
 //  Ends the animation when the requested lifetime is over.  The hard
 //  dismiss wins over the normal fade out, and --duration caps whatever
-//  the configuration asked for.
-bool JarvisHud::CheckLifetime(double t, double tEnd) {
-    if (m_cfg.dismissMs > 0 && t >= (double)m_cfg.dismissMs) {
+//  the timeline says.  The fade out is measured on the LOCAL clock, the
+//  clock of the greeting that is on screen, so that a rotating greeting
+//  gets its own complete cycle.
+bool JarvisHud::CheckLifetime(double tGlobal, double tLocal, double tLocalEnd) {
+    if (m_cfg.dismissMs > 0 && tGlobal >= (double)m_cfg.dismissMs) {
         PostQuitMessage(0);
         return true;
     }
-    if (!m_cfg.persist && t >= tEnd) {
+    if (!m_cfg.persist && tLocal >= tLocalEnd) {
         PostQuitMessage(0);
         return true;
     }
-    if (m_durationMs > 0 && t >= (double)m_durationMs) {
+    if (m_durationMs > 0 && tGlobal >= (double)m_durationMs) {
         PostQuitMessage(0);
         return true;
     }
@@ -2249,13 +2430,19 @@ LRESULT CALLBACK HudWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 1;
         case WM_PAINT: {
             PAINTSTRUCT ps;
-            BeginPaint(hwnd, &ps);
+            HDC dc = BeginPaint(hwnd, &ps);
+            JarvisHud* app = (JarvisHud*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            if (app) app->PaintSurface(dc);
             EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_DESTROY:
+        case WM_DESTROY: {
+            //  The panel is an ordinary top level window, so a restart of
+            //  the shell does not touch it and there is nothing to
+            //  rebuild.  The program simply ends.
             PostQuitMessage(0);
             return 0;
+        }
         default:
             break;
     }
@@ -2272,15 +2459,296 @@ bool JarvisHud::CreateWindowSurface(HINSTANCE instance) {
     wc.lpfnWndProc = HudWindowProc;
     wc.hInstance = instance;
     wc.lpszClassName = L"JarvisHudWindowClass";
+    //  No background brush: the panel is painted in one piece, so there
+    //  is nothing to erase and the window never flickers.
+    wc.hbrBackground = nullptr;
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
-    DWORD exStyle = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
-    if (m_cfg.alwaysOnTop) exStyle |= WS_EX_TOPMOST;
+    //  The window is deliberately NOT layered and NOT topmost.
+    //
+    //  A layered window is blended by the desktop window manager in a
+    //  pass of its own and ends up in front of every ordinary window,
+    //  whatever the z order says, so a layered panel would cover the
+    //  running applications.  An ordinary window obeys the z order, and
+    //  the panel is put into the desktop band, so every application
+    //  window is above it.
+    //
+    //  WS_EX_TRANSPARENT and the HTTRANSPARENT hit test make the mouse
+    //  pass through the panel, and WS_EX_NOACTIVATE keeps it from ever
+    //  taking the focus.
+    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
 
     m_hwnd = CreateWindowExW(exStyle, L"JarvisHudWindowClass", L"JARVIS HUD", WS_POPUP, 0, 0, 1, 1,
                              nullptr, nullptr, instance, nullptr);
     if (!m_hwnd) return false;
     SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, (LONG_PTR)this);
+    return true;
+}
+
+//---------------------------------------------------------------------
+//  The shape of the panel
+//
+//  An ordinary window is a rectangle, so the rounded corners of the
+//  card are cut out with a window region.  The radius is the same one
+//  the card is drawn with.
+//---------------------------------------------------------------------
+void JarvisHud::ApplyPanelRegion() {
+    if (!m_hwnd || m_panelW <= 0 || m_panelH <= 0) return;
+    const int d = (int)std::lround((double)kCornerRadius * (double)m_scale * 2.0);
+    HRGN region = CreateRoundRectRgn(0, 0, m_panelW + 1, m_panelH + 1, d, d);
+    if (!region) return;
+    if (!SetWindowRgn(m_hwnd, region, TRUE)) {
+        DeleteObject(region);
+        return;
+    }
+    //  The window owns the region now.
+}
+
+//---------------------------------------------------------------------
+//  The desktop band
+//
+//  The panel has to be visible on the desktop and invisible over every
+//  running application.  There are two ways to do that, and only one of
+//  them works on this machine.
+//
+//  The obvious one is to make the panel a CHILD of the shell's desktop
+//  window, so that it belongs to the desktop layer:
+//
+//      Progman                     the desktop window
+//        +- SHELLDLL_DefView      the icon container
+//          +- SysListView32       the icons
+//        +- WorkerW               the wallpaper host
+//
+//  That does not work here.  Measured on this Windows 11 25H2 build
+//  with exact colour sampling of the screen:
+//
+//    * a plain (not layered) child of Progman      never paints
+//    * a layered child of Progman (ULW)             never paints
+//    * a colorkey child of Progman                  never paints
+//    * a global alpha child of Progman              never paints
+//    * a child of SHELLDLL_DefView                  never paints
+//    * a child of SysListView32                     never paints
+//
+//  UpdateLayeredWindow reports success, the window is positioned
+//  correctly, and the mouse passes through it to the icon list view, but
+//  not a single pixel of the panel ever reaches the screen.  Sampling
+//  over two and a half seconds shows the wallpaper underneath the whole
+//  time, so it is not a repaint race either: the child simply is not
+//  composited.
+//
+//  The way that does work is to keep the panel a TOP LEVEL window and
+//  to put it into the desktop band by the z order alone: the panel is
+//  placed immediately above the shell's desktop window, and therefore
+//  below every application window.  The shell's desktop window is at
+//  the bottom of the z order, so "immediately above it" is the band that
+//  belongs to the desktop: above the wallpaper and the icons, below
+//  everything else.
+//
+//  The window must NOT be layered (WS_EX_LAYERED).  A layered window is
+//  blended by the desktop window manager in a pass of its own, after
+//  the ordinary windows have been composited, so it ends up in front
+//  of every application window whatever the z order says.  That was
+//  measured on this machine: with a layered panel an ordinary window
+//  that was raised on top of it left none of its pixels visible.  An
+//  ordinary window has a redirection surface like every other window
+//  and obeys the z order, so it is covered as soon as anything is put
+//  in front of it.
+//
+//  Two details make this work and both were measured:
+//
+//    * SetWindowPos(hud, progman) puts the panel BELOW the desktop
+//      window, where the wallpaper hides it.  SetWindowPos(progman, hud)
+//      puts the desktop window below the panel, which is what is wanted.
+//    * The shell raises its desktop window again from time to time (a
+//      desktop refresh, an explorer.exe restart), so the position has to
+//      be re-asserted about once a second.  RefreshDesktopHost() does
+//      that, and it only ever moves the panel within the desktop band.
+//
+//  The panel is never given WS_EX_TOPMOST.  Being topmost is exactly
+//  what "must not overlay other applications" forbids.
+//---------------------------------------------------------------------
+bool JarvisHud::FindDesktopHost(int waitMs) {
+    const ULONGLONG deadline = GetTickCount64() + (ULONGLONG)std::max(0, waitMs);
+    for (;;) {
+        HWND progman = FindWindowW(L"Progman", nullptr);
+        if (progman && IsWindow(progman)) {
+            m_desktopHost = progman;
+            m_iconHost = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
+            return true;
+        }
+        m_desktopHost = nullptr;
+        m_iconHost = nullptr;
+        if (GetTickCount64() >= deadline) return false;
+        Sleep(200);
+    }
+}
+
+//---------------------------------------------------------------------
+//  Putting the panel into the desktop band
+//
+//  The panel is moved to sit immediately above the shell's desktop
+//  window in the z order.  Everything else - the wallpaper, the desktop
+//  icons - is below that point, and every application window is above
+//  it, so no application can ever end up underneath the panel.
+//---------------------------------------------------------------------
+bool JarvisHud::PlaceInDesktopBand() {
+    if (!m_hwnd) return false;
+    if (!m_desktopHost || !IsWindow(m_desktopHost)) {
+        if (!FindDesktopHost(0)) return false;
+    }
+
+    //  Step 1: drop the panel to the very bottom of the z order.  Every
+    //  other window - the wallpaper, the desktop icons, and every
+    //  application - is above it from then on, which is what "must not
+    //  overlay an application" means.
+    SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    //  Step 2: move the shell's desktop window directly below the panel.
+    //  SetWindowPos(hwnd, insertAfter) places hwnd BELOW insertAfter, so
+    //  this puts the desktop window under the panel: the panel is now
+    //  above the wallpaper and the desktop icons, and still below every
+    //  application window.  The other order - the panel below the
+    //  desktop window - puts the panel behind the wallpaper, which was
+    //  measured and does not paint at all.
+    SetWindowPos(m_desktopHost, m_hwnd, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    //  Keep the panel where it belongs in the band as well.  The window
+    //  is not shown here: it is only ever shown while it is in the
+    //  band, so that it can never float above an application.
+    SetWindowPos(m_hwnd, nullptr, m_screenDock.x, m_screenDock.y, m_panelW, m_panelH,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+
+    m_inBand = true;
+    return true;
+}
+
+//---------------------------------------------------------------------
+//  Placement
+//
+//  The panel is docked to the work area of the primary monitor in SCREEN
+//  coordinates, which is what a top level window wants.
+//
+//  The panel is only ever shown while it is in the desktop band.  It is
+//  never raised above the band, so no amount of z-order fiddling by
+//  another program can put it on top of a running application.
+//---------------------------------------------------------------------
+void JarvisHud::UpdateWindowPlacement() {
+    if (!m_hwnd) return;
+
+    m_windowPos = m_screenDock;
+
+    if (m_inBand && m_desktopHost && IsWindow(m_desktopHost)) {
+        //  Already in the band: only the position is refreshed, the
+        //  z order is left exactly as it is.
+        SetWindowPos(m_hwnd, nullptr, m_windowPos.x, m_windowPos.y, m_panelW, m_panelH,
+                     SWP_NOACTIVATE | SWP_NOZORDER);
+        return;
+    }
+
+    //  The panel is not in the band, which only happens before the shell
+    //  has been found.  It stays where it is and stays hidden: the
+    //  desktop band is the only place the panel is allowed to be seen.
+    SetWindowPos(m_hwnd, HWND_BOTTOM, m_windowPos.x, m_windowPos.y, m_panelW, m_panelH,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+}
+
+//---------------------------------------------------------------------
+//  Keeping the panel in the band
+//
+//  The shell raises its desktop window again from time to time: a
+//  desktop refresh, an explorer.exe restart, a shell notification.  When
+//  it does, the panel ends up underneath the desktop window and is
+//  hidden by the wallpaper.
+//
+//  RefreshDesktopHost() therefore looks at the desktop window once a
+//  second and puts the panel back into the band if it has fallen out of
+//  it.  The re-assertion moves the desktop window below the panel again;
+//  it never raises the panel above anything that was in front of it.
+//---------------------------------------------------------------------
+void JarvisHud::RefreshDesktopHost() {
+    if (!m_inBand) return;
+    if (!m_desktopHost || !IsWindow(m_desktopHost)) {
+        //  The shell was restarted and the old desktop window is gone.
+        //  Wait for the new one and drop into the band again.
+        m_desktopHost = nullptr;
+        m_iconHost = nullptr;
+        if (FindDesktopHost(5000)) {
+            PlaceInDesktopBand();
+            UpdateWindowPlacement();
+        }
+        return;
+    }
+
+    //  Is the panel still directly above the desktop window?  If the
+    //  shell has raised the desktop window again, the panel has fallen
+    //  below it and has to be put back.
+    //
+    //  GW_HWNDNEXT is the window directly BELOW the one it is given, so
+    //  the panel is in the band exactly when the desktop window is the
+    //  window that follows it.
+    HWND below = GetWindow(m_hwnd, GW_HWNDNEXT);
+    if (below != m_desktopHost) {
+        PlaceInDesktopBand();
+        UpdateWindowPlacement();
+    }
+}
+
+//---------------------------------------------------------------------
+//  Replacing the greeting
+//
+//  While the panel persists it can swap the greeting it shows for another
+//  one from the corpus.  The new line is picked with the same rules as
+//  the first one (eligible for the time of day, never the same line
+//  twice in a row), expanded afresh, laid out again and typed out from
+//  the beginning.  The panel itself stays exactly where it is.
+//---------------------------------------------------------------------
+bool JarvisHud::ChooseNextGreeting() {
+    if (m_corpus.empty() || m_candidates.empty()) return false;
+
+    size_t chosen = m_greetingIndex;
+    if (m_candidates.size() > 1) {
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            const size_t slot = (size_t)(MixSeed() % (uint32_t)m_candidates.size());
+            const size_t candidate = (size_t)m_candidates[slot];
+            if (candidate != m_greetingIndex) { chosen = candidate; break; }
+        }
+        if (chosen == m_greetingIndex) {
+            //  The random draw kept hitting the line on screen: step to
+            //  the first candidate that differs from it.
+            for (size_t i = 0; i < m_candidates.size(); ++i) {
+                const size_t candidate = (size_t)m_candidates[i];
+                if (candidate != m_greetingIndex) { chosen = candidate; break; }
+            }
+        }
+    }
+    if (chosen == m_greetingIndex) return false;
+
+    m_greetingIndex = chosen;
+    WriteLastIndex((int)m_greetingIndex);
+
+    //  Expand the placeholders again: the clock has moved on.
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    const std::wstring timeStr = FormatTimeHHMM(st);
+    const std::wstring dateStr = FormatLongDate(st);
+    const std::wstring weekdayStr = kWeekdayNames[st.wDayOfWeek % 7];
+    m_greeting = ExpandGreeting(m_corpus[m_greetingIndex].text, m_cfg, timeStr, dateStr,
+                                 weekdayStr);
+
+    //  The new line may be longer, so the layout and the cached text
+    //  bitmap are built again.
+    if (m_family) {
+        const float column = (kTextRight - kTextX) * m_scale;
+        m_layout = ComputeLayout(m_greeting.text, m_cfg, column, m_family.get(), m_scale);
+    }
+    if (!BuildTextBitmap()) return false;
+
+    m_typedChars = -1;
+    m_greetingTick = GetTickCount64();
+    m_bootStart = 0.0;  //  a later greeting does not fade in again
+    ++m_rotations;
     return true;
 }
 
@@ -2315,8 +2783,9 @@ void JarvisHud::ComputeDockPosition() {
         x = work.right - margin - m_panelW;
         y = work.bottom - margin - m_panelH;
     }
-    m_windowPos.x = x;
-    m_windowPos.y = y;
+    m_screenDock.x = x;
+    m_screenDock.y = y;
+    m_windowPos = m_screenDock;
 }
 
 //---------------------------------------------------------------------
@@ -2434,15 +2903,13 @@ int JarvisHud::RunSelfTest() {
     RenderFrame();
 
     //  Dump the composed frames next to the log file for visual
-    //  inspection: the finished greeting and a half typed one.
+    //  inspection: the finished greeting and a half typed one.  The
+    //  frames are the flattened ones, that is exactly what is painted
+    //  on the screen.
     if (!m_logPath.empty()) {
         const std::wstring dir = DirNameOf(m_logPath);
-        std::vector<BYTE> flipped((size_t)m_panelW * (size_t)m_panelH * 4);
-        for (int y = 0; y < m_panelH; ++y) {
-            const BYTE* src = m_outDib.bits + (size_t)(m_panelH - 1 - y) * (size_t)m_outDib.w * 4;
-            memcpy(&flipped[(size_t)y * (size_t)m_panelW * 4], src, (size_t)m_panelW * 4);
-        }
-        const bool ok = WritePngRgb(dir + L"\\JarvisHud_frame.png", flipped.data(), m_panelW,
+        FlattenFrame(255);
+        const bool ok = WritePngRgb(dir + L"\\JarvisHud_frame.png", m_blitDib.bits, m_panelW,
                                     m_panelH);
         snprintf(line, sizeof(line), "frame_png=%s", ok ? "OK" : "FAILED");
         report += line; report += "\r\n";
@@ -2454,11 +2921,8 @@ int JarvisHud::RunSelfTest() {
         m_startTick = GetTickCount64() - (ULONGLONG)(bootEnd + typeDur * 0.55);
         m_typedChars = -1;
         RenderFrame();
-        for (int y = 0; y < m_panelH; ++y) {
-            const BYTE* src = m_outDib.bits + (size_t)(m_panelH - 1 - y) * (size_t)m_outDib.w * 4;
-            memcpy(&flipped[(size_t)y * (size_t)m_panelW * 4], src, (size_t)m_panelW * 4);
-        }
-        const bool ok2 = WritePngRgb(dir + L"\\JarvisHud_frame_typing.png", flipped.data(),
+        FlattenFrame(255);
+        const bool ok2 = WritePngRgb(dir + L"\\JarvisHud_frame_typing.png", m_blitDib.bits,
                                      m_panelW, m_panelH);
         snprintf(line, sizeof(line), "frame_png_typing=%s", ok2 ? "OK" : "FAILED");
         report += line; report += "\r\n";
@@ -2472,6 +2936,12 @@ int JarvisHud::RunSelfTest() {
     const int kProbeFrames = 120;
     LARGE_INTEGER freq, t0, t1;
     QueryPerformanceFrequency(&freq);
+
+    //  The frames are measured with the window being painted, so that
+    //  the numbers are the real cost of a frame and not only of the
+    //  composing part of it.  The window itself is never shown, but
+    //  RedrawWindow paints it all the same.
+    m_present = true;
 
     const double bootEndMs =
         (double)std::max(0, m_cfg.fadeInMs) + (double)std::max(0, m_cfg.bootMs);
@@ -2509,9 +2979,9 @@ int JarvisHud::RunSelfTest() {
     {
         const double n = (double)(m_profFrames > 0 ? m_profFrames : 1);
         snprintf(line, sizeof(line),
-                 "profile_light restore=%.4f compose=%.4f rotor=%.4f fade=%.4f present=%.4f n=%d",
+                 "profile_light restore=%.4f compose=%.4f rotor=%.4f fade=%.4f present=%.4f flatten=%.4f n=%d",
                  m_profRestore / n, m_profGdi / n, m_profRotor / n, m_profPremul / n,
-                 m_profPresent / n, m_profFrames);
+                 m_profPresent / n, m_profFlatten / n, m_profFrames);
         report += line; report += "\r\n";
     }
 
@@ -2544,16 +3014,15 @@ int JarvisHud::RunSelfTest() {
     const double fadeFrameMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 /
                                ((double)freq.QuadPart * (double)kProbeFrames);
 
-    //  The cost of handing a finished frame to the compositor.
-    double ulwMs = 0.0;
+    //  The cost of handing a finished frame to the screen: the frame is
+    //  flattened onto the card and painted into the window.
+    double presentMs = 0.0;
     {
-        m_present = true;  //  The window itself is never shown.
         QueryPerformanceCounter(&t0);
         for (int i = 0; i < kProbeFrames; ++i) Present();
         QueryPerformanceCounter(&t1);
-        m_present = false;
-        ulwMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 /
-                ((double)freq.QuadPart * (double)kProbeFrames);
+        presentMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 /
+                    ((double)freq.QuadPart * (double)kProbeFrames);
     }
 
     //  Estimate the number of frames of the default animation.
@@ -2573,8 +3042,9 @@ int JarvisHud::RunSelfTest() {
     //  eighteen degrees per second and ten redraws a second are ample.
     const double holdRedraws = holdMs / kHoldRedrawMs;
 
-    //  The measured frame times already contain the UpdateLayeredWindow
-    //  call, so the estimate must not add the present cost a second time.
+    //  The measured frame times already contain the painting of the
+    //  window, so the estimate must not add the present cost a second
+    //  time.
     const double drawCost = fadeInFrames * fadeFrameMs + bootFrames * surfaceFrameMs +
                             typeFrames * fullFrameMs + holdRedraws * lightFrameMs +
                             fadeOutFrames * fadeFrameMs;
@@ -2587,7 +3057,7 @@ int JarvisHud::RunSelfTest() {
              "fade_frame_ms=%.4f",
              kProbeFrames, fullFrameMs, lightFrameMs, surfaceFrameMs, fadeFrameMs);
     report += line; report += "\r\n";
-    snprintf(line, sizeof(line), "ulw_ms=%.4f presents=%.0f", ulwMs, presentFrames);
+    snprintf(line, sizeof(line), "present_ms=%.4f presents=%.0f", presentMs, presentFrames);
     report += line; report += "\r\n";
     snprintf(line, sizeof(line),
              "timeline_ms=%.0f frames=%.0f est_draw_ms=%.1f est_total_cpu_ms=%.1f", totalMs,
@@ -2648,21 +3118,45 @@ bool JarvisHud::ShowHud() {
     Mark("static-layer");
 
     ComputeDockPosition();
+    ApplyPanelRegion();
 
-    //  Show without activating, then raise exactly once so the HUD sits
-    //  above the freshly started shell at logon.  It is never raised again.
+    //  ---- the desktop band --------------------------------------------------
+    //  The panel belongs to the desktop, so it is put into the band that
+    //  the shell's own desktop window lives in: directly above it, and
+    //  therefore below every application window.  At logon the shell may
+    //  not be up yet, so the wait for it is bounded.
+    //
+    //  The window is only shown once it is in the band.  If the shell is
+    //  late, the panel stays hidden and goes up as soon as the shell
+    //  appears: a panel that is not in the band must never be seen, or
+    //  it would cover the running applications.
+    if (FindDesktopHost(m_cfg.desktopWaitMs) && PlaceInDesktopBand()) {
+        ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+    }
+    Mark("desktop-band");
+
+    //  The window is never raised above the band.  It is not topmost
+    //  either: being topmost is exactly what "must not overlay other
+    //  applications" forbids.
     m_cpuSetupMs = ProcessCpuMs();
     ResetProfile();
     m_animMs = (double)std::max(0, m_cfg.fadeInMs) + (double)std::max(0, m_cfg.bootMs) +
                (double)std::max(1, m_cfg.typeMs) * (double)m_greeting.text.size() +
                (double)std::max(0, m_cfg.holdMs) + (double)std::max(0, m_cfg.fadeOutMs);
+    //  --duration stretches or squeezes the whole timeline into the
+    //  requested lifetime.  The factor is fixed once, from the first
+    //  greeting, so that the phases of a later greeting do not shift.
+    m_timeScale = 1.0;
+    if (m_durationMs > 0 && m_animMs > 0.0) {
+        m_timeScale = (double)m_durationMs / m_animMs;
+        m_animMs = (double)m_durationMs;
+    }
+    m_bootStart = (double)std::max(0, m_cfg.fadeInMs) * m_timeScale;
     m_startTick = GetTickCount64();
+    m_greetingTick = m_startTick;
     m_typedChars = -1;
     m_fullInit = true;
-    ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
-    const HWND insertAfter = m_cfg.alwaysOnTop ? HWND_TOPMOST : HWND_TOP;
-    SetWindowPos(m_hwnd, insertAfter, m_windowPos.x, m_windowPos.y, m_panelW, m_panelH,
-                 SWP_NOACTIVATE);
+    UpdateWindowPlacement();
 
     SetTimer(m_hwnd, kTimerId, kFrameMs, nullptr);
     UpdateWindow(m_hwnd);
@@ -2728,9 +3222,24 @@ int JarvisHud::Run(HINSTANCE instance, const std::wstring& cmdLine) {
     if (candidates.empty()) {
         for (size_t i = 0; i < m_corpus.size(); ++i) candidates.push_back((int)i);
     }
+    m_candidates = candidates;
     int lastIndex = -1;
     const bool hasLast = ReadLastIndex(lastIndex);
     m_greetingIndex = ChooseGreetingIndex(candidates, lastIndex, hasLast);
+
+    //  The panel is the "Welcome back, sir." card, so that is the line
+    //  it greets you with when it comes up.  The rest of the corpus
+    //  follows as the panel rotates.
+    if (m_cfg.greetingLine > 0) {
+        const int wanted = m_cfg.greetingLine - 1;
+        if (wanted >= 0 && wanted < (int)m_corpus.size()) {
+            bool eligible = false;
+            for (const int c : candidates) {
+                if (c == wanted) { eligible = true; break; }
+            }
+            if (eligible) m_greetingIndex = (size_t)wanted;
+        }
+    }
     WriteLastIndex((int)m_greetingIndex);
     Mark("greeting-pick");
 
@@ -2761,13 +3270,15 @@ int JarvisHud::Run(HINSTANCE instance, const std::wstring& cmdLine) {
                  "jarvishud ok shown=%d frames=%d ticks=%d anim_ms=%.0f fps=%.1f "
                  "cpu_ms=%.1f startup_cpu_ms=%.1f setup_cpu_ms=%.1f "
                  "render_cpu_ms=%.1f greeting=\"%s\" font=\"%s\" "
-                 "dpi=%u panel=%dx%d scale=%.3f alpha=%s",
+                 "dpi=%u panel=%dx%d scale=%.3f alpha=%s "
+                 "band=%d host=%p rotations=%d",
                  shown ? 1 : 0, m_framesDrawn, m_timerTicks, m_animMs,
                  m_animMs > 0.0 ? (double)m_framesDrawn * 1000.0 / m_animMs : 0.0,
                  cpuTotal, g_startupCpuMs, m_cpuSetupMs,
                  cpuTotal - m_cpuSetupMs, NarrowUtf8(m_greeting.text).c_str(),
                  NarrowUtf8(m_fontFamilyName).c_str(), m_dpi, m_panelW, m_panelH,
-                 (double)m_scale, m_gdiPremultiplies ? "premultiplied" : "straight");
+                 (double)m_scale, m_gdiPremultiplies ? "premultiplied" : "straight",
+                 m_inBand ? 1 : 0, (void*)m_desktopHost, m_rotations);
         WriteLog(std::string(line) + "\r\n");
         snprintf(line, sizeof(line),
                  "frame_profile n=%d restore=%.4f compose=%.4f rotor=%.4f fade=%.4f "

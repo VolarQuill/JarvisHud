@@ -59,7 +59,9 @@ $cb = [W+EnumProc] {
         $cn = New-Object System.Text.StringBuilder 256
         [void][W]::GetClassNameW($h, $cn, 256)
         $ex = [W]::GetWindowLongPtr($h, -20).ToInt64()
-        if (($ex -band 0x80000) -ne 0) {   # WS_EX_LAYERED
+        #  The panel is an ordinary window, so it is found by its class
+        #  name, not by the layer bit.
+        if ($cn.ToString() -eq 'JarvisHudWindowClass') {
             $r = New-Object W+RECT
             [void][W]::GetWindowRect($h, [ref]$r)
             [void]$found.Add([pscustomobject]@{
@@ -83,6 +85,7 @@ foreach ($w in $found) {
     Write-Host ('    class    : ' + $w.Class)
     Write-Host ('    exStyle  : ' + $w.ExStyle)
     Write-Host ('    topmost  : ' + $(if (([Convert]::ToInt64($w.ExStyle.Substring(2), 16) -band 0x8) -ne 0) { 'YES' } else { 'no' }))
+    Write-Host ('    layered  : ' + $(if (([Convert]::ToInt64($w.ExStyle.Substring(2), 16) -band 0x80000) -ne 0) { 'YES (wrong)' } else { 'no (correct)' }))
     Write-Host ('    clickthru: ' + $(if (([Convert]::ToInt64($w.ExStyle.Substring(2), 16) -band 0x20) -ne 0) { 'yes' } else { 'no' }))
     Write-Host ('    rect     : L=' + $w.L + ' T=' + $w.T + ' R=' + $w.R + ' B=' + $w.B)
     Write-Host ('    is foreground: ' + ($w.Handle -eq $fg))
